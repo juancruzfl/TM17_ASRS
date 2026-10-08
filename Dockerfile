@@ -24,7 +24,7 @@ ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
 # `new Worker(...)` in src/lib/postgres-sync.js. The DB client is created at
 # import time, so a placeholder URL is needed; no connection is made during
 # the build. The real DATABASE_URL is supplied at runtime.
-RUN DATABASE_URL=postgresql://build:build@127.0.0.1:1/build npx next build --webpack \
+RUN DATABASE_URL=postgresql://build:build@127.0.0.1:1/build npm run build \
  && npm prune --omit=dev
 
 # ---- runtime ----

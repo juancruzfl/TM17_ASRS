@@ -12,7 +12,7 @@
     "db:migrate:form-questions": "set -a; [ ! -f .env.local ] || . ./.env.local; set +a; PSQL_BIN=\"$(which -a psql | grep -v '/node_modules/' | head -n 1)\"; \"$PSQL_BIN\" \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f database/migrations/20260820_form_questions.sql",
     "db:migrate:qr-counters": "set -a; [ ! -f .env.local ] || . ./.env.local; set +a; PSQL_BIN=\"$(which -a psql | grep -v '/node_modules/' | head -n 1)\"; \"$PSQL_BIN\" \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f database/migrations/20260821_qr_aggregate_counters.sql",
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run"
