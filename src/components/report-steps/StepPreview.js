@@ -2,7 +2,12 @@
 
 import { useMemo, useState } from 'react';
 import DataTable from '@/components/DataTable';
-import { computeTrendData, processReportData, validateTrendConfig } from '@/lib/report-engine';
+import GoalsTable from '@/components/GoalsTable';
+import { getReportStatusLabel } from '@/lib/report-status';
+import { isQuestionFilterActive, processReportData } from '@/lib/report-engine';
+import { describeQuestionFilter, describeQuestionFilterScope } from '@/lib/report-view-filters';
+import { formatDateRange, isDateRangeActive } from '@/lib/report-date-range';
+import { analyzeQuestionSelection } from '@/lib/question-analysis';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Cell,
@@ -10,7 +15,7 @@ import {
 
 const COLORS = ['#C0392B', '#E67E22', '#F39C12', '#27AE60', '#2980B9'];
 
-export default function StepPreview({ reportConfig, tableData, onGenerate, isSubmitting }) {
+export default function StepPreview({ reportConfig, tableData, questions = [], selectedGoals = [], onGenerate, isSubmitting }) {
   const selectedInitiativeId = reportConfig.selectedInitiative?.id;
   const questionSelections = useMemo(
     () => reportConfig.questionSelections || [],
@@ -41,29 +46,27 @@ export default function StepPreview({ reportConfig, tableData, onGenerate, isSub
         },
       };
     }
+    const questionAnalyses = questionSelections.map((selection) => ({ ...selection, column: selection.label }));
     const processed = processReportData(
       tableData,
       reportConfig.filters || {},
       reportConfig.expressions || [],
       reportConfig.sorts || [],
-      attributes
+      attributes,
+      questionAnalyses
     );
     return {
       ...processed,
-      trendData: questionSelections.flatMap((selection) => {
-        const trendValidation = validateTrendConfig({
-          variables: [selection.label], enabledCalc: true, enabledDisplay: true,
-          method: selection.method, thresholdPct: 2,
-        }, attributes);
-        return trendValidation.valid
-          ? computeTrendData(processed.filteredData, trendValidation.normalized, { initiativeId: selectedInitiativeId, reportName })
-          : [];
-      }),
+      trendData: questionAnalyses.flatMap((selection) => analyzeQuestionSelection(processed.filteredData, selection, {
+        options: questions.find((question) => question.id === selection.id)?.options || [],
+        attributes,
+        context: { initiativeId: selectedInitiativeId, reportName },
+      })),
     };
-  }, [tableData, reportConfig.filters, reportConfig.expressions, reportConfig.sorts, previewAttributes, questionSelections, selectedInitiativeId, reportName]);
+  }, [tableData, reportConfig.filters, reportConfig.expressions, reportConfig.sorts, previewAttributes, questionSelections, questions, selectedInitiativeId, reportName]);
 
   // Build human-readable config summary
-  const activeFilterEntries = Object.entries(reportConfig.filters || {}).filter(([, v]) => v && v !== 'All');
+  const activeQuestionFilters = questionSelections.filter((selection) => isQuestionFilterActive(selection.filter));
   const hasExpressions = (reportConfig.expressions || []).length > 0;
   const hasSorts = (reportConfig.sorts || []).length > 0;
 
@@ -100,7 +103,7 @@ export default function StepPreview({ reportConfig, tableData, onGenerate, isSub
   return (
     <div>
       <h2 style={{ fontSize: '1.15rem', fontWeight: '600', marginBottom: '0.5rem' }}>
-        Step 6: Preview & Generate
+        Step 5: Preview & Generate
       </h2>
       <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.9rem', marginBottom: '1rem' }}>
         Review your configuration and preview the results before generating the report.
@@ -142,12 +145,35 @@ export default function StepPreview({ reportConfig, tableData, onGenerate, isSub
               {questionSelections.map((selection) => selection.label).join(', ') || '—'}
             </p>
           </div>
-          {activeFilterEntries.length > 0 && (
+          <div>
+            <span style={{ color: 'var(--color-text-light)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Status After Generating</span>
+            <p style={{ margin: '0.15rem 0 0 0', fontWeight: '500' }}>
+              {getReportStatusLabel(reportConfig.status)}
+            </p>
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <span style={{ color: 'var(--color-text-light)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Goals</span>
+            <p style={{ margin: '0.15rem 0 0 0' }}>
+              {selectedGoals.map((goal) => goal.goal_name).join(', ') || '—'}
+            </p>
+          </div>
+          {isDateRangeActive(reportConfig) && (
+            <div style={{ gridColumn: '1 / -1' }}>
+              <span style={{ color: 'var(--color-text-light)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Response Date Range</span>
+              <p style={{ margin: '0.15rem 0 0 0' }}>Submitted {formatDateRange(reportConfig)}</p>
+            </div>
+          )}
+          {activeQuestionFilters.length > 0 && (
             <div style={{ gridColumn: '1 / -1' }}>
               <span style={{ color: 'var(--color-text-light)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Filters</span>
-              <p style={{ margin: '0.15rem 0 0 0' }}>
-                {activeFilterEntries.map(([k, v]) => `${k} = "${v}"`).join(', ')}
-              </p>
+              {activeQuestionFilters.map((selection) => (
+                <p key={selection.id} style={{ margin: '0.15rem 0 0 0' }}>
+                  {selection.label} {describeQuestionFilter(selection.filter)}{' '}
+                  <span style={{ color: 'var(--color-text-light)' }}>
+                    ({describeQuestionFilterScope(selection.filter)})
+                  </span>
+                </p>
+              ))}
             </div>
           )}
           {hasExpressions && (
@@ -170,6 +196,13 @@ export default function StepPreview({ reportConfig, tableData, onGenerate, isSub
           )}
         </div>
       </div>
+
+      {/* Goals — shown in both views */}
+      {selectedGoals.length > 0 && (
+        <div style={{ marginBottom: '1.25rem' }}>
+          <GoalsTable goals={selectedGoals} />
+        </div>
+      )}
 
       {/* ===== TABLE VIEW ===== */}
       {viewMode === 'table' && (

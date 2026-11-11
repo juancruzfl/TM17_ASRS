@@ -19,12 +19,17 @@ export async function getInitiatives() {
 }
 
 /**
- * getReportData(initiativeId)
- * Returns the full report data for one specific initiative.
- * This includes: summary stats, chart data, and table data.
+ * getReportData(initiativeId, { startDate, endDate })
+ * Returns the full report data for one specific initiative: summary stats,
+ * chart data, and table data. The optional response date range (YYYY-MM-DD,
+ * inclusive) limits all of them to responses submitted in that range.
  */
-export async function getReportData(initiativeId) {
-  const response = await fetch(`/api/initiatives/${initiativeId}/report-data`);
+export async function getReportData(initiativeId, { startDate, endDate } = {}) {
+  const params = new URLSearchParams();
+  if (startDate) params.set('startDate', startDate);
+  if (endDate) params.set('endDate', endDate);
+  const qs = params.toString();
+  const response = await fetch(`/api/initiatives/${initiativeId}/report-data${qs ? `?${qs}` : ''}`);
   if (!response.ok) return null;
   return response.json();
 }
@@ -34,6 +39,17 @@ export async function getReportQuestions(initiativeId) {
   if (!response.ok) return [];
   const data = await response.json();
   return Array.isArray(data.questions) ? data.questions : [];
+}
+
+/**
+ * getReportGoals(initiativeId)
+ * Returns the initiative's goals, scored, for selection on a report.
+ */
+export async function getReportGoals(initiativeId) {
+  const response = await fetch(`/api/initiatives/${initiativeId}/report-goals`);
+  if (!response.ok) return [];
+  const data = await response.json();
+  return Array.isArray(data.goals) ? data.goals : [];
 }
 
 /**

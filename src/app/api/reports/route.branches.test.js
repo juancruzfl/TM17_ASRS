@@ -15,7 +15,7 @@ vi.mock('@/lib/report-validation', () => ({
   validateReportUpdatePayload: validateReportUpdatePayloadMock,
 }));
 
-vi.mock('@/lib/query-helpers', () => ({ querySelectedQuestionData: querySelectedQuestionDataMock }));
+vi.mock('@/lib/query-helpers', async (importOriginal) => ({ submittedAtClause: (await importOriginal()).submittedAtClause, querySelectedQuestionData: querySelectedQuestionDataMock }));
 vi.mock('@/lib/adapters/report-adapter', () => ({
   toReportListItemDto: toReportListItemDtoMock,
   toReportDetailDto: toReportDetailDtoMock,
@@ -75,7 +75,7 @@ describe('/api/reports branch coverage', () => {
     validateReportCreatePayloadMock.mockReturnValueOnce({ valid: false, error: 'bad' });
     expect((await POST(req({}))).status).toBe(400);
 
-    validateReportCreatePayloadMock.mockReturnValue({ valid: true, value: { initiativeId: 2, name: 'R1', questionSelections: [{ id: 5, method: 'delta_halves' }] } });
+    validateReportCreatePayloadMock.mockReturnValue({ valid: true, value: { initiativeId: 2, name: 'R1', questionSelections: [{ id: 5, method: 'delta_halves' }], goalIds: [] } });
     requirePermissionMock.mockReturnValueOnce({ error: new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 }) });
     expect((await POST(req({ initiativeId: 2 }))).status).toBe(403);
 
@@ -98,7 +98,7 @@ describe('/api/reports branch coverage', () => {
       if (query.includes('INSERT INTO reports')) return { run: () => ({ lastInsertRowid: 7 }) };
       return { get: vi.fn(), run: vi.fn(), all: vi.fn(() => []) };
     });
-    querySelectedQuestionDataMock.mockReturnValue({ tableData: [{ Question: 1 }], questions: [{ field_id: 5, field_label: 'Question', column: 'Question' }] });
+    querySelectedQuestionDataMock.mockReturnValue({ tableData: [{ Question: 1 }], questions: [{ field_id: 5, field_label: 'Question', field_type: 'rating', column: 'Question' }] });
     reportEngineMock.validateTrendConfig.mockReturnValueOnce({ valid: false, error: 'trend bad' });
     expect((await POST(req({ initiativeId: 2 }))).status).toBe(400);
 
@@ -106,6 +106,40 @@ describe('/api/reports branch coverage', () => {
     reportEngineMock.processReportData.mockReturnValue({ filteredData: [], metrics: {}, explainability: {} });
     reportEngineMock.computeTrendData.mockReturnValue([]);
     expect((await POST(req({ initiativeId: 2, name: 'R1' }))).status).toBe(200);
+
+    // A goal id that is not one of the initiative's goals is rejected.
+    const goalPayload = { valid: true, value: { initiativeId: 2, name: 'R1', questionSelections: [{ id: 5, method: 'delta_halves' }], goalIds: [42] } };
+    validateReportCreatePayloadMock.mockReturnValueOnce(goalPayload);
+    const goalsRes = await POST(req({ initiativeId: 2 }));
+    expect(goalsRes.status).toBe(400);
+    expect((await goalsRes.json()).error).toContain('goals');
+
+    // A selected goal is stored, scored, in the report snapshot.
+    const baseImpl = prepareMock.getMockImplementation();
+    const insertReportRun = vi.fn(() => ({ lastInsertRowid: 8 }));
+    prepareMock.mockImplementation((sql) => {
+      const query = String(sql || '');
+      if (query.includes('FROM initiative_goal')) {
+        return { all: () => [{ goal_id: 42, goal_name: 'Reach 100', description: '', target_value: 100, current_value: 50, weight: 100, scoring_method: 'linear', deadline: null, source_root_field_id: null, source_method: null }] };
+      }
+      if (query.includes('INSERT INTO reports')) return { run: insertReportRun };
+      return baseImpl(sql);
+    });
+    validateReportCreatePayloadMock.mockReturnValueOnce(goalPayload);
+    expect((await POST(req({ initiativeId: 2 }))).status).toBe(200);
+    const [, , , insertedStatus, , reportData, , publishedAt] = insertReportRun.mock.calls[0];
+    expect(insertedStatus).toBe('completed');
+    expect(publishedAt).toBeNull();
+    const snapshot = JSON.parse(reportData);
+    expect(snapshot.config.goalIds).toEqual([42]);
+    expect(snapshot.results.goals).toEqual([expect.objectContaining({ goal_id: 42, goal_name: 'Reach 100', score: 50 })]);
+    // A report generated as published gets its publish date at creation.
+    validateReportCreatePayloadMock.mockReturnValueOnce({ valid: true, value: { ...goalPayload.value, status: 'published' } });
+    expect((await POST(req({ initiativeId: 2 }))).status).toBe(200);
+    const publishedInsert = insertReportRun.mock.calls[1];
+    expect(publishedInsert[3]).toBe('published');
+    expect(publishedInsert[7]).toBe(publishedInsert[6]);
+    prepareMock.mockImplementation(baseImpl);
 
     reportEngineMock.processReportData.mockImplementationOnce(() => { throw new Error('boom'); });
     expect((await POST(req({ initiativeId: 2, name: 'R1' }))).status).toBe(500);
@@ -120,19 +154,34 @@ describe('/api/reports branch coverage', () => {
     validateReportUpdatePayloadMock.mockReturnValue({ valid: true, value: { id: 1, name: 'N', description: 'D', status: 'completed' } });
     prepareMock.mockImplementation((sql) => {
       const query = String(sql || '');
-      if (query.includes('SELECT id FROM reports WHERE id = ?')) return { get: () => undefined };
+      if (query.includes('SELECT id, status FROM reports WHERE id = ?')) return { get: () => undefined };
       return { get: vi.fn(), run: vi.fn(), all: vi.fn(() => []) };
     });
     expect((await PUT(putReq({ id: 1 }))).status).toBe(404);
 
     prepareMock.mockImplementation((sql) => {
       const query = String(sql || '');
-      if (query.includes('SELECT id FROM reports WHERE id = ?')) return { get: () => ({ id: 1 }) };
+      if (query.includes('SELECT id, status FROM reports WHERE id = ?')) return { get: () => ({ id: 1 }) };
       if (query.includes('UPDATE reports SET')) return { run: vi.fn() };
       if (query.includes('WHERE r.id = ?')) return { get: () => ({ id: 1 }) };
       return { get: vi.fn(), run: vi.fn(), all: vi.fn(() => []) };
     });
     expect((await PUT(putReq({ id: 1 }))).status).toBe(200);
+
+    validateReportUpdatePayloadMock.mockReturnValue({ valid: true, value: { id: 1, status: 'published' } });
+    const updateRun = vi.fn();
+    prepareMock.mockImplementation((sql) => {
+      const query = String(sql || '');
+      if (query.includes('SELECT id, status FROM reports WHERE id = ?')) return { get: () => ({ id: 1, status: 'archived' }) };
+      if (query.includes('UPDATE reports SET')) {
+        expect(query).toContain('published_at = ?');
+        return { run: updateRun };
+      }
+      if (query.includes('WHERE r.id = ?')) return { get: () => ({ id: 1 }) };
+      return { get: vi.fn(), run: vi.fn(), all: vi.fn(() => []) };
+    });
+    expect((await PUT(putReq({ id: 1 }))).status).toBe(200);
+    expect(updateRun).toHaveBeenCalledWith('published', expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), 1);
 
     validateReportUpdatePayloadMock.mockImplementationOnce(() => { throw new Error('boom'); });
     expect((await PUT(putReq({ id: 1 }))).status).toBe(500);

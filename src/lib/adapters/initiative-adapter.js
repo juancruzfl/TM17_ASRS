@@ -8,6 +8,12 @@ function safeParseJson(value, fallback) {
   }
 }
 
+// Only initiatives with settings.isPublic set to true appear on the public
+// reporting pages. No saved value means private, as in the initiative forms.
+export function isInitiativePublic(settings) {
+  return safeParseJson(settings, {})?.isPublic === true;
+}
+
 export function toInitiativeDto(row) {
   if (!row) return null;
 
@@ -23,8 +29,10 @@ export function toInitiativeDto(row) {
     status: settings.status || 'Active',
     category: row.category_name || settings.category || null,
     participant_count: row.participant_count != null ? Number(row.participant_count) : 0,
+    member_count: row.member_count != null ? Number(row.member_count) : 0,
     submission_count: row.submission_count != null ? Number(row.submission_count) : 0,
-    avg_score: row.avg_score != null ? Math.round(Number(row.avg_score) * 10) / 10 : 0,
+    // Overall goal score (0-100); null when the initiative has no goals.
+    overall_score: row.overall_score != null ? Number(row.overall_score) : null,
     created_at: row.created_at || null,
     updated_at: row.updated_at || null,
   };

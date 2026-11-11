@@ -2,48 +2,19 @@
 
 import PageLayout from '@/components/PageLayout';
 import ReasonModal from '@/components/ReasonModal';
-import { useState, useEffect, use, Fragment } from 'react';
+import ConfirmDeleteModal from '@/components/ConfirmDeleteModal';
+import TabBar from '@/components/TabBar';
+import SurveyList from '@/components/SurveyList';
+import ReportList from '@/components/ReportList';
+import SurveyResponsesView from '@/components/SurveyResponsesView';
+import GoalsTable from '@/components/GoalsTable';
+import { getScoreColor } from '@/lib/score-utils';
+import Link from 'next/link';
+import { useState, useEffect, use } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuthStore } from '@/lib/auth/use-auth-store';
 import { apiFetch } from '@/lib/api/client';
-
-const ATTRIBUTE_CATALOG = [
-  'Grade',
-  'School',
-  'Interest Level',
-  'Career Awareness',
-  'Participation Count',
-  'Session Rating',
-  'Completion Status',
-  'Safety Score',
-  'Project Completion',
-  'Team Size',
-  'Robot Performance',
-  'Attendance Rate',
-  'Reading Level',
-  'Award Type',
-  'Improvement Score',
-  'Semester',
-  'Bags Collected',
-  'Families Helped',
-  'Volunteer Count',
-  'Donation Value',
-  'Event Date',
-  'Event Type',
-  'Personal Best',
-  'Team Placement',
-  'Practice Attendance',
-  'Season',
-  'Proposal Topic',
-  'Score',
-  'Award Level',
-  'Reviewer Rating',
-  'Submission Date',
-  'Product Category',
-  'Innovation Score',
-  'Presentation Rating',
-  'Feasibility Score',
-];
+import { INITIATIVE_STATUS_OPTIONS, getInitiativeStatusOption, normalizeInitiativeStatus } from '@/lib/initiative-status';
 
 export default function InitiativeManagePage({ params }) {
   const { id } = use(params);
@@ -56,8 +27,15 @@ export default function InitiativeManagePage({ params }) {
   const [participants, setParticipants] = useState([]);
   const [totalSubmissions, setTotalSubmissions] = useState(0);
   const [anonymousSubmissions, setAnonymousSubmissions] = useState(0);
-  const [submissions, setSubmissions] = useState([]);
-  const [expandedSubmission, setExpandedSubmission] = useState(null);
+  const [surveyTemplates, setSurveyTemplates] = useState([]);
+  // Response counts for this initiative's surveys ({ counts: { [templateId]: n }, total });
+  // the responses themselves load a page at a time in the Submissions tab.
+  const [responseCounts, setResponseCounts] = useState({ counts: {}, total: 0 });
+  const [goals, setGoals] = useState([]);
+  const [overallScore, setOverallScore] = useState(0);
+  const [goalQuestions, setGoalQuestions] = useState([]);
+  const [goalsMessage, setGoalsMessage] = useState('');
+  const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
@@ -67,58 +45,59 @@ export default function InitiativeManagePage({ params }) {
   const [addRole, setAddRole] = useState('participant');
   const [addingMember, setAddingMember] = useState(false);
 
-  // View toggle — default to 'edit' tab if ?tab=edit in URL
-  const initialTab = searchParams.get('tab') === 'edit' ? 'edit' : 'members';
+  // Selected tab; ?tab=<key> opens a specific one (?tab=edit is the old name for details).
+  const TAB_KEYS = ['details', 'members', 'goals', 'surveys', 'reports', 'submissions'];
+  const requestedTab = searchParams.get('tab') === 'edit' ? 'details' : searchParams.get('tab');
+  const initialTab = TAB_KEYS.includes(requestedTab) ? requestedTab : 'details';
   const [activeTab, setActiveTab] = useState(initialTab);
 
   // ── Edit form state ──────────────────────────────────
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
-  const [editCategoryId, setEditCategoryId] = useState('');
-  const [editSelectedAttributes, setEditSelectedAttributes] = useState([]);
-  const [editCustomAttributes, setEditCustomAttributes] = useState([]);
-  const [editNewAttribute, setEditNewAttribute] = useState('');
-  const [editStatus, setEditStatus] = useState('Active');
+  const [editStatus, setEditStatus] = useState('active');
   const [editIsPublic, setEditIsPublic] = useState(false);
-  const [editAddQuestions, setEditAddQuestions] = useState(false);
-  const [editQuestions, setEditQuestions] = useState(['']);
   const [editMessage, setEditMessage] = useState('');
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [showReasonModal, setShowReasonModal] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
-  const [dbCategories, setDbCategories] = useState([]);
+  const [deletingInitiative, setDeletingInitiative] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
 
-  const allAttributes = [...ATTRIBUTE_CATALOG, ...editCustomAttributes];
+  // Runs only after ConfirmDeleteModal's warning and type-the-name check.
+  async function handleDeleteInitiative() {
+    if (!initiative || deletingInitiative) return;
+    setDeletingInitiative(true);
+    try {
+      const response = await apiFetch(`/api/initiatives/${id}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to delete initiative');
+      }
+      router.push(`/initiative-creation?deleted=${encodeURIComponent(initiative.name)}`);
+    } catch (error) {
+      alert(error.message || 'Connection error. Please try again.');
+      setDeletingInitiative(false);
+    }
+  }
 
   useEffect(() => {
     if (!hydrated) return;
     if (!user) { router.push('/login'); return; }
-    if (user.user_type !== 'admin' && user.user_type !== 'staff') { router.push('/'); return; }
+    if (user.user_type !== 'admin' && user.user_type !== 'staff') { router.push('/dashboard'); return; }
     loadData();
   }, [hydrated, user, id]);
-
-  // Fetch categories for the edit form
-  useEffect(() => {
-    apiFetch('/api/categories')
-      .then(r => r.json())
-      .then(data => {
-        if (data.categories) setDbCategories(data.categories);
-      })
-      .catch(err => console.error('Error fetching categories:', err));
-  }, []);
 
   async function loadData() {
     setLoading(true);
     setError('');
     try {
-      const [initRes, membersRes, catRes] = await Promise.all([
+      const [initRes, membersRes] = await Promise.all([
         apiFetch(`/api/initiatives/${id}`),
         apiFetch(`/api/initiatives/${id}/members`),
-        apiFetch(`/api/initiative-categories?initiative_id=${id}`),
+        loadSurveysAndReports(),
       ]);
       const initData = await initRes.json();
       const membersData = await membersRes.json();
-      const catData = await catRes.json();
 
       if (initRes.ok && initData.initiative) {
         const init = initData.initiative;
@@ -127,17 +106,8 @@ export default function InitiativeManagePage({ params }) {
         // Populate edit form
         setEditName(init.name || '');
         setEditDescription(init.description || '');
-        setEditSelectedAttributes(init.attributes || []);
-        setEditStatus(init.settings?.status || 'Active');
+        setEditStatus(normalizeInitiativeStatus(init.settings?.status));
         setEditIsPublic(!!init.settings?.isPublic);
-        if (init.questions && init.questions.length > 0) {
-          setEditAddQuestions(true);
-          setEditQuestions(init.questions);
-        }
-
-        // Detect custom attributes (ones not in ATTRIBUTE_CATALOG)
-        const customs = (init.attributes || []).filter(a => !ATTRIBUTE_CATALOG.includes(a));
-        if (customs.length > 0) setEditCustomAttributes(customs);
       } else {
         setError('Initiative not found');
       }
@@ -145,18 +115,85 @@ export default function InitiativeManagePage({ params }) {
       if (membersRes.ok && membersData.success) {
         setMembers(membersData.members || []);
         setParticipants(membersData.participants || []);
-        setSubmissions(membersData.submissions || []);
         setTotalSubmissions(membersData.totalSubmissions || 0);
         setAnonymousSubmissions(membersData.anonymousSubmissions || 0);
       }
 
-      if (catData.relationships && catData.relationships.length > 0) {
-        setEditCategoryId(String(catData.relationships[0].category_id));
-      }
     } catch (err) {
       setError('Failed to load initiative data: ' + err.message);
     }
     setLoading(false);
+  }
+
+  // GET a JSON endpoint for one of the tabs. Resolves to { data } or { error }
+  // (the server's message when it sent one) and never throws.
+  async function fetchTabData(url, what) {
+    try {
+      const res = await apiFetch(url);
+      const body = await res.json().catch(() => null);
+      if (!res.ok) return { error: `Could not load ${what}: ${body?.error || `server responded ${res.status}`}` };
+      return { data: body };
+    } catch (err) {
+      return { error: `Could not load ${what}: ${err.message || 'connection error'}` };
+    }
+  }
+
+  // On a failed load the tab keeps what it showed before and the page banner
+  // says what went wrong, instead of the tab silently going empty.
+
+  // Goals tab data; resolves to the fresh goal list (GoalsTable uses it after a
+  // save), or undefined when the reload failed.
+  async function loadGoals() {
+    const { data, error: loadError } = await fetchTabData(`/api/goals?initiativeId=${encodeURIComponent(id)}`, 'goals');
+    if (loadError) { notify(loadError, 'error'); return undefined; }
+    const list = Array.isArray(data?.goals) ? data.goals : [];
+    setGoals(list);
+    setOverallScore(data?.overallScore || 0);
+    return list;
+  }
+
+  // Goals, surveys and reports tabs.
+  async function loadSurveysAndReports() {
+    const [templatesResult, surveysResult, questionsResult] = await Promise.all([
+      fetchTabData('/api/surveys/templates', 'surveys'),
+      fetchTabData(`/api/surveys/counts?initiativeId=${encodeURIComponent(id)}`, 'survey response counts'),
+      fetchTabData(`/api/goals/questions?initiativeId=${encodeURIComponent(id)}`, 'goal questions'),
+      loadGoals(),
+      loadReports(),
+    ]);
+    const failures = [templatesResult, surveysResult, questionsResult].filter(r => r.error);
+    if (failures.length) notify(failures.map(r => r.error).join(' '), 'error');
+    if (!questionsResult.error) {
+      setGoalQuestions(Array.isArray(questionsResult.data?.questions) ? questionsResult.data.questions : []);
+    }
+    if (!templatesResult.error) {
+      const templates = Array.isArray(templatesResult.data) ? templatesResult.data : [];
+      setSurveyTemplates(templates.filter(t => String(t.initiative_id) === String(id)));
+    }
+    if (!surveysResult.error) {
+      setResponseCounts({ counts: surveysResult.data?.counts || {}, total: Number(surveysResult.data?.total) || 0 });
+    }
+  }
+
+  // Reports tab: active reports are every report that has not been archived.
+  async function loadReports() {
+    const { data, error: loadError } = await fetchTabData(`/api/reports?initiativeId=${encodeURIComponent(id)}`, 'reports');
+    if (loadError) { notify(loadError, 'error'); return; }
+    const allReports = Array.isArray(data?.reports) ? data.reports : [];
+    setReports(allReports.filter(r => (r.status || '').toLowerCase() !== 'archived'));
+  }
+
+  // Survey responses that belong to this initiative's surveys (Submissions tab).
+  async function reloadResponseCounts() {
+    const result = await fetchTabData(`/api/surveys/counts?initiativeId=${encodeURIComponent(id)}`, 'survey response counts');
+    if (result.error) { notify(result.error, 'error'); return; }
+    setResponseCounts({ counts: result.data?.counts || {}, total: Number(result.data?.total) || 0 });
+  }
+
+  // Messages from the report and survey lists go to the page banners.
+  function notify(message, type = 'success') {
+    if (type === 'error') { setSuccessMessage(''); setError(message); }
+    else { setError(''); setSuccessMessage(message); }
   }
 
   async function handleAddMember(e) {
@@ -206,31 +243,6 @@ export default function InitiativeManagePage({ params }) {
   }
 
   // ── Edit form handlers ──────────────────────────────
-  function handleAttributeToggle(attribute) {
-    setEditSelectedAttributes(prev =>
-      prev.includes(attribute) ? prev.filter(a => a !== attribute) : [...prev, attribute]
-    );
-  }
-
-  function handleAddCustomAttribute() {
-    const trimmed = editNewAttribute.trim();
-    if (!trimmed) return;
-    if (allAttributes.some(a => a.toLowerCase() === trimmed.toLowerCase())) {
-      setEditMessage('This attribute already exists.');
-      return;
-    }
-    setEditCustomAttributes(prev => [...prev, trimmed]);
-    setEditSelectedAttributes(prev => [...prev, trimmed]);
-    setEditNewAttribute('');
-    setEditMessage('');
-  }
-
-  function handleQuestionChange(index, value) {
-    const updated = [...editQuestions];
-    updated[index] = value;
-    setEditQuestions(updated);
-  }
-
   function handleEditSubmit(e) {
     e.preventDefault();
     setEditMessage('');
@@ -241,24 +253,12 @@ export default function InitiativeManagePage({ params }) {
       setEditSubmitting(false);
       return;
     }
-    if (editSelectedAttributes.length === 0) {
-      setEditMessage('Please select at least one attribute.');
-      setEditSubmitting(false);
-      return;
-    }
-
-    const cleanedQuestions = editAddQuestions
-      ? editQuestions.map(q => q.trim()).filter(Boolean)
-      : [];
-
+    // questions is omitted so the API keeps the initiative's existing questions.
     setPendingAction({
       payload: {
         name: editName.trim(),
         description: editDescription.trim(),
-        attributes: editSelectedAttributes,
-        questions: cleanedQuestions,
         settings: { status: editStatus, isPublic: editIsPublic },
-        categoryId: editCategoryId || null,
       },
     });
     setShowReasonModal(true);
@@ -270,8 +270,7 @@ export default function InitiativeManagePage({ params }) {
     if (!pendingAction) return;
     setEditSubmitting(true);
     try {
-      const { categoryId: selectedCategoryId, ...rest } = pendingAction.payload;
-      const body = { ...rest, reasonType, reasonText };
+      const body = { ...pendingAction.payload, reasonType, reasonText };
       const response = await apiFetch(`/api/initiatives/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -280,28 +279,6 @@ export default function InitiativeManagePage({ params }) {
       const data = await response.json();
 
       if (response.ok) {
-        // Handle category assignment
-        const initiativeId = Number(id);
-        // Remove existing categories
-        const existingCats = await apiFetch(`/api/initiative-categories?initiative_id=${initiativeId}`).then(r => r.json());
-        if (existingCats.relationships) {
-          for (const rel of existingCats.relationships) {
-            await apiFetch('/api/initiative-categories', {
-              method: 'DELETE',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ initiative_id: initiativeId, category_id: rel.category_id }),
-            });
-          }
-        }
-        // Assign new category if selected
-        if (selectedCategoryId) {
-          await apiFetch('/api/initiative-categories', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initiative_id: initiativeId, category_id: Number(selectedCategoryId) }),
-          });
-        }
-
         setEditMessage('Initiative updated successfully!');
         setSuccessMessage('Initiative updated successfully!');
         loadData();
@@ -348,17 +325,6 @@ export default function InitiativeManagePage({ params }) {
     );
   }
 
-  const tabStyle = (active) => ({
-    padding: '0.5rem 1.25rem',
-    fontSize: '0.85rem',
-    fontWeight: 600,
-    border: 'none',
-    cursor: 'pointer',
-    borderRadius: '6px',
-    backgroundColor: active ? 'var(--color-asrs-orange, #E67E22)' : '#F3F4F6',
-    color: active ? '#fff' : '#6B7280',
-  });
-
   const inputSt = {
     padding: '0.55rem 0.75rem',
     border: '1px solid #E5E7EB',
@@ -400,14 +366,14 @@ export default function InitiativeManagePage({ params }) {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '0.75rem' }}>
         <div>
-          <button className="btn-outline" onClick={() => router.push('/initiative-creation')} style={{ marginBottom: '0.5rem', fontSize: '0.85rem' }}>
-            &larr; Back to Initiatives
-          </button>
           <h2 style={{ fontSize: '1.3rem', fontWeight: 700, color: '#111827', margin: 0 }}>{initiative.name}</h2>
           {initiative.description && (
             <p style={{ color: '#6B7280', fontSize: '0.9rem', margin: '0.25rem 0 0' }}>{initiative.description}</p>
           )}
         </div>
+        <button className="btn-outline" onClick={() => router.push('/initiative-creation')} style={{ alignSelf: 'flex-end', fontSize: '0.85rem' }}>
+          &larr; Back to Initiatives
+        </button>
       </div>
 
       {/* Stats */}
@@ -426,7 +392,7 @@ export default function InitiativeManagePage({ params }) {
         </div>
         <div className="stat-card">
           <div className="stat-label">Status</div>
-          <div className="stat-value" style={{ fontSize: '1rem' }}>{initiative.settings?.status || 'Active'}</div>
+          <div className="stat-value" style={{ fontSize: '1rem' }}>{getInitiativeStatusOption(initiative.settings?.status).label}</div>
         </div>
       </div>
 
@@ -442,24 +408,26 @@ export default function InitiativeManagePage({ params }) {
         </div>
       )}
 
-      {/* Tab toggle */}
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-        <button onClick={() => setActiveTab('edit')} style={tabStyle(activeTab === 'edit')}>
-          Edit Details
-        </button>
-        <button onClick={() => setActiveTab('members')} style={tabStyle(activeTab === 'members')}>
-          Members ({members.length})
-        </button>
-        <button onClick={() => setActiveTab('participants')} style={tabStyle(activeTab === 'participants')}>
-          Submissions ({totalSubmissions})
-        </button>
-      </div>
+      {/* Tabs */}
+      <TabBar
+        ariaLabel="Initiative sections"
+        tabs={[
+          { key: 'details', label: 'Details' },
+          { key: 'members', label: `Members (${members.length})` },
+          { key: 'goals', label: `Goals (${goals.length})` },
+          { key: 'surveys', label: `Surveys (${surveyTemplates.length})` },
+          { key: 'reports', label: `Reports (${reports.length})` },
+          { key: 'submissions', label: `Submissions (${responseCounts.total})` },
+        ]}
+        activeTab={activeTab}
+        onChange={setActiveTab}
+      />
 
-      {/* ── Edit Details Tab ── */}
-      {activeTab === 'edit' && (
+      {/* ── Details Tab ── */}
+      {activeTab === 'details' && (
         <div className="card">
           <div className="card-header">
-            <h3 className="card-title">Edit Initiative Details</h3>
+            <h3 className="card-title">Initiative Details</h3>
           </div>
 
           {editMessage && (
@@ -477,8 +445,8 @@ export default function InitiativeManagePage({ params }) {
           )}
 
           <form onSubmit={handleEditSubmit}>
-            {/* Row 1: Name + Category */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+            {/* Name */}
+            <div style={{ marginBottom: '1rem' }}>
               <div>
                 <label style={labelStyle}>
                   Initiative Name <span style={{ color: '#c62828' }}>*</span>
@@ -492,22 +460,6 @@ export default function InitiativeManagePage({ params }) {
                   style={inputStyle}
                   {...focusHandlers}
                 />
-              </div>
-              <div>
-                <label style={labelStyle}>Category</label>
-                <select
-                  value={editCategoryId}
-                  onChange={(e) => setEditCategoryId(e.target.value)}
-                  style={{ ...inputStyle, cursor: 'pointer' }}
-                  {...focusHandlers}
-                >
-                  <option value="">Select category...</option>
-                  {dbCategories.map((cat) => (
-                    <option key={cat.category_id} value={cat.category_id}>
-                      {cat.category_name}
-                    </option>
-                  ))}
-                </select>
               </div>
             </div>
 
@@ -524,81 +476,6 @@ export default function InitiativeManagePage({ params }) {
               />
             </div>
 
-            {/* Attributes */}
-            <div style={{ marginBottom: '1.25rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                <label style={{ ...labelStyle, marginBottom: 0 }}>
-                  Attributes <span style={{ color: '#c62828' }}>*</span>
-                  <span style={{ fontSize: '0.8rem', fontWeight: '400', color: '#9CA3AF', marginLeft: '0.5rem' }}>
-                    {editSelectedAttributes.length} selected
-                  </span>
-                </label>
-                {user?.user_type === 'admin' && (
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <input
-                      type="text"
-                      value={editNewAttribute}
-                      onChange={(e) => setEditNewAttribute(e.target.value)}
-                      placeholder="Custom attribute..."
-                      style={{ ...inputStyle, width: 180, marginBottom: 0, fontSize: '0.85rem', padding: '0.4rem 0.6rem' }}
-                      {...focusHandlers}
-                    />
-                    <button
-                      type="button"
-                      onClick={handleAddCustomAttribute}
-                      className="btn-outline"
-                      style={{ whiteSpace: 'nowrap', fontSize: '0.85rem', padding: '0.4rem 0.75rem' }}
-                    >
-                      Add
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <div style={{
-                maxHeight: '200px',
-                overflowY: 'auto',
-                border: '1px solid #E5E7EB',
-                borderRadius: '8px',
-                padding: '0.5rem',
-                backgroundColor: '#F9FAFB',
-              }}>
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-                  gap: '0.25rem',
-                }}>
-                  {allAttributes.map((attribute) => {
-                    const isSelected = editSelectedAttributes.includes(attribute);
-                    return (
-                      <label
-                        key={attribute}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          cursor: 'pointer',
-                          padding: '0.4rem 0.6rem',
-                          borderRadius: '6px',
-                          backgroundColor: isSelected ? '#FFF7ED' : 'transparent',
-                          border: isSelected ? '1px solid #FDBA74' : '1px solid transparent',
-                          transition: 'all 0.15s ease',
-                          fontSize: '0.85rem',
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => handleAttributeToggle(attribute)}
-                          style={{ marginRight: '0.5rem', cursor: 'pointer', accentColor: '#E67E22' }}
-                        />
-                        <span style={{ color: '#111827' }}>{attribute}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
             {/* Settings row */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
               <div>
@@ -609,9 +486,9 @@ export default function InitiativeManagePage({ params }) {
                   style={{ ...inputStyle, cursor: 'pointer' }}
                   {...focusHandlers}
                 >
-                  <option value="Active">Active</option>
-                  <option value="draft">Draft</option>
-                  <option value="archived">Archived</option>
+                  {INITIATIVE_STATUS_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
                 </select>
               </div>
               <div style={{ display: 'flex', alignItems: 'flex-end' }}>
@@ -637,65 +514,25 @@ export default function InitiativeManagePage({ params }) {
               </div>
             </div>
 
-            {/* Questions */}
-            <div style={{ marginBottom: '1.5rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: editAddQuestions ? '0.75rem' : 0 }}>
-                <label style={{ ...labelStyle, marginBottom: 0 }}>Questions</label>
-                <label style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  cursor: 'pointer',
-                  fontSize: '0.85rem',
-                  color: '#6B7280',
-                }}>
-                  <input
-                    type="checkbox"
-                    checked={editAddQuestions}
-                    onChange={(e) => setEditAddQuestions(e.target.checked)}
-                    style={{ marginRight: '0.4rem', cursor: 'pointer', accentColor: '#E67E22' }}
-                  />
-                  Add questions
-                </label>
-              </div>
-
-              {editAddQuestions && (
-                <div>
-                  {editQuestions.map((q, i) => (
-                    <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                      <input
-                        type="text"
-                        value={q}
-                        onChange={(e) => handleQuestionChange(i, e.target.value)}
-                        placeholder={`Question ${i + 1}`}
-                        style={{ ...inputStyle, flex: 1 }}
-                        {...focusHandlers}
-                      />
-                      {editQuestions.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => setEditQuestions(editQuestions.filter((_, idx) => idx !== i))}
-                          className="btn-outline"
-                          style={{ color: '#c62828', borderColor: '#FECACA' }}
-                        >
-                          Remove
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => setEditQuestions([...editQuestions, ''])}
-                    className="btn-outline"
-                    style={{ marginTop: '0.25rem', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}
-                  >
-                    + Add another question
-                  </button>
-                </div>
-              )}
-            </div>
-
             {/* Form actions */}
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                onClick={() => setShowDeleteModal(true)}
+                disabled={deletingInitiative}
+                style={{
+                  padding: '0.5rem 1rem',
+                  borderRadius: '8px',
+                  border: '1px solid #FCA5A5',
+                  backgroundColor: '#fff',
+                  color: '#DC2626',
+                  fontSize: '0.9rem',
+                  fontWeight: 600,
+                  cursor: deletingInitiative ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Delete
+              </button>
               <button
                 type="submit"
                 disabled={editSubmitting}
@@ -706,6 +543,16 @@ export default function InitiativeManagePage({ params }) {
               </button>
             </div>
           </form>
+
+          <ConfirmDeleteModal
+            open={showDeleteModal}
+            onClose={() => setShowDeleteModal(false)}
+            onConfirm={handleDeleteInitiative}
+            itemName={initiative.name}
+            deleting={deletingInitiative}
+            title="Delete this initiative?"
+            warning="Deleting this initiative permanently removes it and all associated data, including its survey submissions and reports."
+          />
 
           <ReasonModal
             open={showReasonModal}
@@ -800,81 +647,93 @@ export default function InitiativeManagePage({ params }) {
         </>
       )}
 
-      {/* ── Submissions Tab ── */}
-      {activeTab === 'participants' && (
-        <div className="card">
-          <div className="card-header">
-            <h3 className="card-title">Survey Submissions</h3>
-            <span style={{ fontSize: '0.85rem', color: '#6B7280' }}>{totalSubmissions} total</span>
-          </div>
-
-          {submissions.length === 0 ? (
-            <p style={{ color: '#9CA3AF', textAlign: 'center', padding: '2rem', fontSize: '0.9rem' }}>
-              No survey submissions yet for this initiative.
-            </p>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: '40px' }}>#</th>
-                    <th>Submitted By</th>
-                    <th>Date</th>
-                    <th>Fields</th>
-                    <th style={{ width: '60px' }}></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {submissions.map((s, idx) => {
-                    const isExpanded = expandedSubmission === s.submission_id;
-                    const submitter = s.first_name
-                      ? `${s.first_name} ${s.last_name}`
-                      : 'Anonymous';
-                    return (
-                      <Fragment key={s.submission_id}>
-                        <tr
-                          style={{ cursor: 'pointer' }}
-                          onClick={() => setExpandedSubmission(isExpanded ? null : s.submission_id)}
-                        >
-                          <td style={{ fontWeight: 500, color: '#9CA3AF' }}>{idx + 1}</td>
-                          <td>
-                            <div style={{ fontWeight: 600, color: '#111827' }}>{submitter}</div>
-                            {s.email && <div style={{ fontSize: '0.78rem', color: '#9CA3AF' }}>{s.email}</div>}
-                          </td>
-                          <td style={{ color: '#6B7280' }}>{formatDate(s.submitted_at)}</td>
-                          <td style={{ color: '#6B7280' }}>{s.values.length} field{s.values.length !== 1 ? 's' : ''}</td>
-                          <td style={{ textAlign: 'center', color: '#E67E22', fontWeight: 600, fontSize: '0.85rem' }}>
-                            {isExpanded ? '\u25B2' : '\u25BC'}
-                          </td>
-                        </tr>
-                        {isExpanded && (
-                          <tr>
-                            <td colSpan={5} style={{ padding: 0, border: 'none' }}>
-                              <div style={{ padding: '0.75rem 1rem 1rem 2.5rem', backgroundColor: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
-                                {s.values.length === 0 ? (
-                                  <p style={{ color: '#9CA3AF', fontSize: '0.85rem', margin: 0 }}>No field data recorded.</p>
-                                ) : (
-                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.5rem' }}>
-                                    {s.values.map((v, vIdx) => (
-                                      <div key={vIdx} style={{ fontSize: '0.85rem' }}>
-                                        <span style={{ color: '#6B7280', fontWeight: 600 }}>{v.field_label}:</span>{' '}
-                                        <span style={{ color: '#111827' }}>{v.value || '\u2014'}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
+      {/* ── Surveys Tab (same survey entries as the Surveys page) ── */}
+      {activeTab === 'surveys' && (
+        <SurveyList
+          templates={surveyTemplates.map(t => ({ ...t, initiative_name: initiative.name }))}
+          responseCounts={responseCounts.counts}
+          onChanged={loadSurveysAndReports}
+          onNotify={notify}
+          emptyState={(
+            <div className="card">
+              <p style={{ color: '#9CA3AF', textAlign: 'center', padding: '2rem', fontSize: '0.9rem', margin: 0 }}>
+                No surveys for this initiative yet.{' '}
+                <Link href="/form-creation" style={{ color: '#E67E22' }}>Create one</Link>
+              </p>
             </div>
           )}
-        </div>
+        />
+      )}
+
+      {/* ── Goals Tab (same goal list and Edit drop-downs as Goals & Scoring) ── */}
+      {activeTab === 'goals' && (
+        <>
+          {goalsMessage && (
+            <div style={{
+              padding: '0.75rem 1rem', marginBottom: '1rem', borderRadius: '8px', fontSize: '0.9rem',
+              backgroundColor: /success|deleted/i.test(goalsMessage) ? '#d1fae5' : '#FEF2F2',
+              border: `1px solid ${/success|deleted/i.test(goalsMessage) ? '#a7f3d0' : '#FECACA'}`,
+              color: /success|deleted/i.test(goalsMessage) ? '#065f46' : '#DC2626',
+            }}>
+              {goalsMessage}
+            </div>
+          )}
+          <div className="card" style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Overall Score</div>
+              <div style={{ fontSize: '1.75rem', fontWeight: 700, color: goals.length ? getScoreColor(overallScore) : '#9CA3AF' }}>
+                {goals.length ? `${overallScore}%` : '\u2014'}
+              </div>
+            </div>
+            <Link href={`/goals?initiative=${encodeURIComponent(id)}`} className="btn-primary">
+              Manage Goals
+            </Link>
+          </div>
+          {goals.length === 0 ? (
+            <div className="card">
+              <p style={{ color: '#9CA3AF', textAlign: 'center', padding: '2rem', fontSize: '0.9rem', margin: 0 }}>
+                No goals for this initiative yet.{' '}
+                <Link href={`/goals?initiative=${encodeURIComponent(id)}`} style={{ color: '#E67E22' }}>Add one</Link>
+              </p>
+            </div>
+          ) : (
+            <GoalsTable
+              goals={goals}
+              editable
+              questions={goalQuestions}
+              onGoalsChanged={loadGoals}
+              onMessage={setGoalsMessage}
+            />
+          )}
+        </>
+      )}
+
+      {/* ── Reports Tab (same report entries as the Reports page; active = not archived) ── */}
+      {activeTab === 'reports' && (
+        <ReportList
+          reports={reports.map(r => ({ ...r, initiative_name: r.initiative_name || initiative.name }))}
+          onChanged={loadReports}
+          onNotify={notify}
+          emptyState={(
+            <div className="card">
+              <p style={{ color: '#9CA3AF', textAlign: 'center', padding: '2rem', fontSize: '0.9rem', margin: 0 }}>
+                No active reports for this initiative.{' '}
+                <Link href="/report-creation" style={{ color: '#E67E22' }}>Create one</Link>
+              </p>
+            </div>
+          )}
+        />
+      )}
+
+      {/* ── Submissions Tab (same responses table as Surveys > Survey Responses) ── */}
+      {activeTab === 'submissions' && (
+        <SurveyResponsesView
+          templates={surveyTemplates}
+          initiativeId={id}
+          recentPageSize={100}
+          onDeleted={reloadResponseCounts}
+          onNotify={notify}
+        />
       )}
     </PageLayout>
   );

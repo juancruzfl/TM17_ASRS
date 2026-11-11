@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/lib/auth/use-auth-store';
 import { toSurveyTemplateViewModel } from '@/lib/adapters/survey-template-adapter';
 import { validateFieldValue } from '@/lib/field-validation';
+import { isLikertType } from '@/lib/forms/likert-scales';
 
 export default function SurveyPage() {
   const router = useRouter();
@@ -27,10 +28,6 @@ export default function SurveyPage() {
   const isPublicView = isQrAccess || userRole === 'public' || isPreviewMode;
 
   // Form fields
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
-  const [initiativeRating, setInitiativeRating] = useState('');
-  const [initiativeComments, setInitiativeComments] = useState('');
 
   // Submission state
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -132,7 +129,7 @@ export default function SurveyPage() {
       setTemplateLoading(true);
       fetch(`/api/surveys/templates/${id}`)
         .then((res) => {
-          if (!res.ok) throw new Error('Template not found');
+          if (!res.ok) throw new Error('Survey not found');
           return res.json();
         })
         .then((templateData) => {
@@ -140,7 +137,7 @@ export default function SurveyPage() {
         })
         .catch((err) => {
           console.error('Error loading survey template:', err);
-          setError('Survey template not found. The link may be invalid or expired.');
+          setError('Survey not found. The link may be invalid or expired.');
         })
         .finally(() => {
           setTemplateLoading(false);
@@ -185,14 +182,11 @@ export default function SurveyPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (isSubmitting) return;
+    // Responses are always stored against a survey (the form only shows with one).
+    if (isSubmitting || !surveyTemplate) return;
     setError(null);
 
     const newInvalidFields = {};
-
-    // Validate personal info
-    if (!firstName.trim()) newInvalidFields.firstName = true;
-    if (!lastName.trim()) newInvalidFields.lastName = true;
 
     if (surveyTemplate) {
       // Template survey: validate non-personal-info questions
@@ -201,14 +195,8 @@ export default function SurveyPage() {
         if (!isQuestionRequired) return;
         const qId = q.id;
         const questionType = q.type || q.text?.type || 'text';
-        const questionSubQuestions = q.subQuestions || q.text?.subQuestions || [];
 
-        if (questionType === 'yesno') {
-          const answers = templateResponses[qId] || {};
-          if (Object.keys(answers).length < questionSubQuestions.length) {
-            newInvalidFields[`question_${qId}`] = true;
-          }
-        } else if (questionType === 'multiselect' || questionType === 'checkbox') {
+        if (questionType === 'multiselect' || questionType === 'checkbox') {
           if (!templateResponses[qId] || templateResponses[qId].length === 0) {
             newInvalidFields[`question_${qId}`] = true;
           }
@@ -222,9 +210,6 @@ export default function SurveyPage() {
           }
         }
       });
-    } else {
-      // Default survey: validate initiative rating
-      if (!initiativeRating) newInvalidFields.initiativeRating = true;
     }
 
     if (Object.keys(newInvalidFields).length > 0) {
@@ -276,42 +261,21 @@ export default function SurveyPage() {
     setIsSubmitting(true);
 
     try {
-      let payload;
+      // Responses are anonymous and identified by the submission id the API returns.
+      // Keep older templates with auto-generated name fields valid without
+      // displaying or collecting those fields from the respondent.
+      const mergedAnswers = { ...templateResponses };
+      personalInfoFields.forEach((pf) => {
+        mergedAnswers[pf.id] = 'Anonymous';
+      });
 
-      if (surveyTemplate) {
-        const submissionEmail = `anonymous+${Date.now()}@asrs.local`;
-        // Map personal info fields back to their template question IDs
-        const mergedAnswers = { ...templateResponses };
-        personalInfoFields.forEach((pf) => {
-          if (pf._piKey === 'firstName') mergedAnswers[pf.id] = firstName.trim();
-          if (pf._piKey === 'lastName') mergedAnswers[pf.id] = lastName.trim();
-          if (pf._piKey === 'name') mergedAnswers[pf.id] = `${firstName.trim()} ${lastName.trim()}`;
-        });
-
-        payload = {
-          name: `${firstName.trim()} ${lastName.trim()}`,
-          email: submissionEmail,
-          responses: {
-            firstName: firstName.trim(),
-            lastName: lastName.trim(),
-            templateId: surveyTemplate.id,
-            templateTitle: surveyTemplate.title,
-            templateAnswers: mergedAnswers,
-          },
-        };
-      } else {
-        const submissionEmail = `anonymous+${Date.now()}@asrs.local`;
-        payload = {
-          name: `${firstName.trim()} ${lastName.trim()}`,
-          email: submissionEmail,
-          responses: {
-            firstName: firstName.trim(),
-            lastName: lastName.trim(),
-            initiativeRating,
-            initiativeComments: initiativeComments.trim(),
-          },
-        };
-      }
+      const payload = {
+        templateId: surveyTemplate.id,
+        responses: {
+          templateId: surveyTemplate.id,
+          templateAnswers: mergedAnswers,
+        },
+      };
 
       const res = await fetch('/api/surveys', {
         method: 'POST',
@@ -348,10 +312,6 @@ export default function SurveyPage() {
   };
 
   const handleReset = () => {
-    setFirstName('');
-    setLastName('');
-    setInitiativeRating('');
-    setInitiativeComments('');
     setTemplateResponses({});
     setSubmitted(false);
     setSubmissionInfo(null);
@@ -443,15 +403,6 @@ export default function SurveyPage() {
   const fieldGroupStyle = {
     marginBottom: '1.25rem',
   };
-
-  // Rating options
-  const ratingOptions = [
-    { value: 'very_satisfied', label: 'Very Satisfied', emoji: '😍' },
-    { value: 'satisfied', label: 'Satisfied', emoji: '😊' },
-    { value: 'neutral', label: 'Neutral', emoji: '😐' },
-    { value: 'dissatisfied', label: 'Dissatisfied', emoji: '😕' },
-    { value: 'very_dissatisfied', label: 'Very Dissatisfied', emoji: '😞' },
-  ];
 
   if (!isMounted) {
     if (isPublicView) {
@@ -570,51 +521,46 @@ export default function SurveyPage() {
                 </div>
               ) : (
                 <>
-                  {isPreviewMode && userRole !== 'public' && (
-                    <div style={{ marginBottom: '1rem' }}>
-                      <button
-                        onClick={() => router.push('/manage-surveys')}
-                        className="btn-outline"
-                        style={{ marginBottom: '0.5rem' }}
-                      >
-                        &larr; Back to Manage Surveys
-                      </button>
-                      <div style={{
-                        padding: '0.5rem 1rem',
-                        backgroundColor: '#FEF3C7',
-                        border: '1px solid #FDE68A',
-                        borderRadius: '8px',
-                        fontSize: '0.85rem',
-                        color: '#92400E',
-                        fontWeight: 500,
-                      }}>
-                        Preview Mode — This is how the survey appears to participants.
-                      </div>
+                  {/* Return buttons: top-right corner of the survey card */}
+                  {(userRole !== 'public' || activeDistributions.length > 1) && (
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '1rem' }}>
+                      {userRole !== 'public' ? (
+                        <button
+                          onClick={() => router.push('/manage-surveys')}
+                          className="btn-outline"
+                        >
+                          {isPreviewMode ? <>&larr; Back to Manage Surveys</> : 'Manage surveys'}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setShowSurveyPicker(true);
+                            setActiveDistribution(null);
+                            setSurveyTemplate(null);
+                            setTemplateResponses({});
+                            setSubmitted(false);
+                            setError(null);
+                          }}
+                          style={{ background: 'none', border: 'none', color: '#E67E22', cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem', padding: 0 }}
+                        >
+                          &larr; Back to all surveys
+                        </button>
+                      )}
                     </div>
                   )}
-                  {userRole !== 'public' && !isPreviewMode && (
-                    <button
-                      onClick={() => router.push('/manage-surveys')}
-                      className="btn-outline"
-                      style={{ marginBottom: '1rem' }}
-                    >
-                      Manage surveys
-                    </button>
-                  )}
-                  {userRole === 'public' && activeDistributions.length > 1 && (
-                    <button
-                      onClick={() => {
-                        setShowSurveyPicker(true);
-                        setActiveDistribution(null);
-                        setSurveyTemplate(null);
-                        setTemplateResponses({});
-                        setSubmitted(false);
-                        setError(null);
-                      }}
-                      style={{ background: 'none', border: 'none', color: '#E67E22', cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem', marginBottom: '1rem', padding: 0 }}
-                    >
-                      &larr; Back to all surveys
-                    </button>
+                  {isPreviewMode && userRole !== 'public' && (
+                    <div style={{
+                      padding: '0.5rem 1rem',
+                      marginBottom: '1rem',
+                      backgroundColor: '#FEF3C7',
+                      border: '1px solid #FDE68A',
+                      borderRadius: '8px',
+                      fontSize: '0.85rem',
+                      color: '#92400E',
+                      fontWeight: 500,
+                    }}>
+                      Preview Mode — This is how the survey appears to participants.
+                    </div>
                   )}
 
                   {/* Survey Title & Description */}
@@ -657,9 +603,8 @@ export default function SurveyPage() {
                         <div style={{ margin: '1rem auto', maxWidth: '520px', textAlign: 'left', fontSize: '0.9rem' }}>
                           <h3 style={{ marginTop: 0, fontSize: '1rem', color: '#111827' }}>Submission Details</h3>
                           <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-                            <li><strong>ID:</strong> {submissionInfo.surveyId || submissionInfo.survey.id}</li>
-                            <li><strong>Name:</strong> {submissionInfo.survey.name}</li>
-                            <li><strong>Template:</strong> {submissionInfo.survey.responses?.templateTitle || 'N/A'}</li>
+                            <li><strong>Response ID:</strong> {submissionInfo.surveyId || submissionInfo.survey.id}</li>
+                            <li><strong>Survey:</strong> {submissionInfo.survey.templateTitle || 'N/A'}</li>
                           </ul>
                         </div>
                       )}
@@ -670,6 +615,12 @@ export default function SurveyPage() {
                       >
                         Submit Another Response
                       </button>
+                    </div>
+                  ) : !surveyTemplate ? (
+                    /* ---- No survey chosen: responses are always stored against a survey ---- */
+                    <div style={{ textAlign: 'center', padding: '2rem 1rem', color: '#6B7280' }}>
+                      <p style={{ fontSize: '1rem', fontWeight: 600, color: '#111827', margin: '0 0 0.5rem' }}>No survey selected</p>
+                      <p style={{ margin: 0 }}>Open this page from a survey link or QR code to take a survey.</p>
                     </div>
                   ) : (
                     /* ---- Survey Form ---- */
@@ -692,50 +643,6 @@ export default function SurveyPage() {
 
                       <fieldset disabled={isSubmitting} style={{ border: 'none', margin: 0, padding: 0, minInlineSize: 0 }}>
 
-                        {/* ---- Section: Personal Information ---- */}
-                        <div style={{ borderBottom: '1px solid #E5E7EB', paddingBottom: '1.25rem', marginBottom: '1.25rem' }}>
-                          <h2 style={{ fontSize: '1.1rem', fontWeight: '600', color: '#111827', marginBottom: '1rem' }}>
-                            Personal Information
-                          </h2>
-
-                          {/* First Name & Last Name – side by side */}
-                          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                            <div id="field-firstName" style={{ ...fieldGroupStyle, flex: '1 1 45%', minWidth: '200px' }}>
-                              <label style={labelStyle}>
-                                First Name <span style={{ color: '#E67E22' }}>*</span>
-                              </label>
-                              <input
-                                type="text"
-                                placeholder="John"
-                                value={firstName}
-                                onChange={(e) => {
-                                  setFirstName(e.target.value);
-                                  if (invalidFields.firstName) setInvalidFields((p) => ({ ...p, firstName: false }));
-                                }}
-                                style={invalidFields.firstName ? invalidInputStyle : inputStyle}
-                              />
-                              {invalidFields.firstName && <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>First name is required.</span>}
-                            </div>
-                            <div id="field-lastName" style={{ ...fieldGroupStyle, flex: '1 1 45%', minWidth: '200px' }}>
-                              <label style={labelStyle}>
-                                Last Name <span style={{ color: '#E67E22' }}>*</span>
-                              </label>
-                              <input
-                                type="text"
-                                placeholder="Doe"
-                                value={lastName}
-                                onChange={(e) => {
-                                  setLastName(e.target.value);
-                                  if (invalidFields.lastName) setInvalidFields((p) => ({ ...p, lastName: false }));
-                                }}
-                                style={invalidFields.lastName ? invalidInputStyle : inputStyle}
-                              />
-                              {invalidFields.lastName && <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>Last name is required.</span>}
-                            </div>
-                          </div>
-
-                        </div>
-
                         {surveyTemplate ? (
                           /* ---- Section: Template Questions (personal info filtered out) ---- */
                           surveyQuestions.length > 0 ? (
@@ -748,7 +655,7 @@ export default function SurveyPage() {
                               const questionText = q.label || q.text?.question || q.question || '';
                               const questionType = q.type || q.text?.type || 'text';
                               const questionOptions = q.options || q.text?.options || [];
-                              const questionSubQuestions = q.subQuestions || q.text?.subQuestions || [];
+                              const questionOptionDetails = q.optionDetails || q.text?.optionDetails || questionOptions.map(option => ({ value: option, label: option }));
                               const qId = q.id;
                               const isRequired = q.required ?? q.text?.required ?? true;
                               const isInvalid = !!invalidFields[`question_${qId}`];
@@ -873,6 +780,39 @@ export default function SurveyPage() {
                                     </>
                                   )}
 
+                                  {isLikertType(questionType) && questionOptionDetails.length > 0 && (
+                                    <>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                        {questionOptionDetails.map(option => {
+                                          const numericValue = Number(option.value);
+                                          return (
+                                            <label key={option.value} style={{
+                                              display: 'flex', alignItems: 'center', gap: '0.65rem',
+                                              padding: '0.6rem 0.85rem', borderRadius: '8px', cursor: 'pointer',
+                                              border: templateResponses[qId] === numericValue ? '2px solid #E67E22' : '1px solid #E5E7EB',
+                                              backgroundColor: templateResponses[qId] === numericValue ? '#FFF7ED' : '#fff',
+                                            }}>
+                                              <input
+                                                type="radio"
+                                                name={`question_${qId}`}
+                                                value={numericValue}
+                                                checked={templateResponses[qId] === numericValue}
+                                                onChange={() => {
+                                                  setTemplateResponses({ ...templateResponses, [qId]: numericValue });
+                                                  if (isInvalid) setInvalidFields((previous) => ({ ...previous, [`question_${qId}`]: false }));
+                                                }}
+                                                style={{ accentColor: '#E67E22' }}
+                                              />
+                                              <span style={{ minWidth: '18px', fontWeight: 700, color: '#E67E22' }}>{numericValue}</span>
+                                              <span>{option.label}</span>
+                                            </label>
+                                          );
+                                        })}
+                                      </div>
+                                      {isInvalid && <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>Please select an option.</span>}
+                                    </>
+                                  )}
+
                                   {questionType === 'select' && questionOptions.length > 0 && (
                                     <>
                                       <select
@@ -890,7 +830,7 @@ export default function SurveyPage() {
                                     </>
                                   )}
 
-                                  {(questionType === 'choice' || questionType === 'radio') && questionOptions.length > 0 && (
+                                  {(questionType === 'choice' || questionType === 'radio' || questionType === 'yesno') && questionOptions.length > 0 && (
                                     <>
                                       <div style={{
                                         display: 'flex', flexDirection: 'column', gap: '0.5rem',
@@ -958,132 +898,12 @@ export default function SurveyPage() {
                                       {isInvalid && <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>Please select at least one option.</span>}
                                     </>
                                   )}
-
-                                  {questionType === 'yesno' && questionSubQuestions.length > 0 && (
-                                    <>
-                                      <table style={{
-                                        width: '100%', borderCollapse: 'collapse', fontSize: '0.92rem',
-                                        ...(isInvalid ? { border: '1.5px solid #ef4444', borderRadius: '8px' } : {}),
-                                      }}>
-                                        <thead>
-                                          <tr>
-                                            <th style={{ textAlign: 'left', padding: '0.4rem 0.5rem', borderBottom: '1px solid #E5E7EB', width: '60%' }}></th>
-                                            <th style={{ textAlign: 'center', padding: '0.4rem 0.5rem', borderBottom: '1px solid #E5E7EB' }}>Yes</th>
-                                            <th style={{ textAlign: 'center', padding: '0.4rem 0.5rem', borderBottom: '1px solid #E5E7EB' }}>No</th>
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          {questionSubQuestions.map((sub, sIdx) => (
-                                            <tr key={sIdx} style={{ backgroundColor: sIdx % 2 === 0 ? '#F9FAFB' : 'transparent' }}>
-                                              <td style={{ padding: '0.5rem', color: '#111827' }}>{sub}</td>
-                                              <td style={{ textAlign: 'center', padding: '0.5rem' }}>
-                                                <input
-                                                  type="radio"
-                                                  name={`question_${qId}_${sIdx}`}
-                                                  value="yes"
-                                                  checked={(templateResponses[qId]?.[sIdx]) === 'yes'}
-                                                  onChange={() => {
-                                                    const prev = templateResponses[qId] || {};
-                                                    setTemplateResponses({ ...templateResponses, [qId]: { ...prev, [sIdx]: 'yes' } });
-                                                    if (isInvalid) setInvalidFields((p) => ({ ...p, [`question_${qId}`]: false }));
-                                                  }}
-                                                  style={{ accentColor: '#E67E22' }}
-                                                />
-                                              </td>
-                                              <td style={{ textAlign: 'center', padding: '0.5rem' }}>
-                                                <input
-                                                  type="radio"
-                                                  name={`question_${qId}_${sIdx}`}
-                                                  value="no"
-                                                  checked={(templateResponses[qId]?.[sIdx]) === 'no'}
-                                                  onChange={() => {
-                                                    const prev = templateResponses[qId] || {};
-                                                    setTemplateResponses({ ...templateResponses, [qId]: { ...prev, [sIdx]: 'no' } });
-                                                    if (isInvalid) setInvalidFields((p) => ({ ...p, [`question_${qId}`]: false }));
-                                                  }}
-                                                  style={{ accentColor: '#E67E22' }}
-                                                />
-                                              </td>
-                                            </tr>
-                                          ))}
-                                        </tbody>
-                                      </table>
-                                      {isInvalid && <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>Please answer all sub-questions.</span>}
-                                    </>
-                                  )}
                                 </div>
                               );
                             })}
                           </div>
                           ) : null
-                        ) : (
-                          /* ---- Section: Default Initiative Feedback ---- */
-                          <div style={{ borderBottom: '1px solid #E5E7EB', paddingBottom: '1.25rem', marginBottom: '1.5rem' }}>
-                            <h2 style={{ fontSize: '1.1rem', fontWeight: '600', color: '#111827', marginBottom: '1rem' }}>
-                              Initiative Feedback
-                            </h2>
-
-                            {/* Rating question */}
-                            <div style={fieldGroupStyle}>
-                              <label style={labelStyle}>
-                                <span style={{ color: '#E67E22', fontWeight: '700' }}>1.</span>{' '}
-                                How do you like your initiative? <span style={{ color: '#E67E22' }}>*</span>
-                              </label>
-                              <p style={{ fontSize: '0.82rem', color: '#9CA3AF', marginBottom: '0.65rem' }}>
-                                Select the option that best describes your experience.
-                              </p>
-                              <div id="field-initiativeRating" style={{
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '0.5rem',
-                                ...(invalidFields.initiativeRating ? { border: '1.5px solid #ef4444', borderRadius: '8px', padding: '0.5rem', backgroundColor: '#fef2f2' } : {}),
-                              }}>
-                                {ratingOptions.map((option) => (
-                                  <label
-                                    key={option.value}
-                                    style={{
-                                      display: 'flex', alignItems: 'center', gap: '0.65rem',
-                                      padding: '0.6rem 0.85rem', borderRadius: '8px',
-                                      border: initiativeRating === option.value ? '2px solid #E67E22' : '1px solid #E5E7EB',
-                                      backgroundColor: initiativeRating === option.value ? '#FFF7ED' : '#fff',
-                                      cursor: 'pointer', transition: 'all 0.15s ease',
-                                    }}
-                                  >
-                                    <input
-                                      type="radio"
-                                      name="initiativeRating"
-                                      value={option.value}
-                                      checked={initiativeRating === option.value}
-                                      onChange={(e) => {
-                                        setInitiativeRating(e.target.value);
-                                        if (invalidFields.initiativeRating) setInvalidFields((p) => ({ ...p, initiativeRating: false }));
-                                      }}
-                                      style={{ accentColor: '#E67E22' }}
-                                    />
-                                    <span style={{ fontSize: '1.15rem' }}>{option.emoji}</span>
-                                    <span style={{ fontSize: '0.92rem', color: '#111827' }}>{option.label}</span>
-                                  </label>
-                                ))}
-                              </div>
-                              {invalidFields.initiativeRating && <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>Please select a rating.</span>}
-                            </div>
-
-                            {/* Additional comments */}
-                            <div style={fieldGroupStyle}>
-                              <label style={labelStyle}>
-                                <span style={{ color: '#E67E22', fontWeight: '700' }}>2.</span>{' '}
-                                Additional Comments
-                              </label>
-                              <textarea
-                                placeholder="Share any additional thoughts or suggestions..."
-                                value={initiativeComments}
-                                onChange={(e) => setInitiativeComments(e.target.value)}
-                                rows={4}
-                                style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit' }}
-                              />
-                            </div>
-                          </div>
-                        )}
+                        ) : null}
                       </fieldset>
 
                       {/* ---- Submit Button ---- */}

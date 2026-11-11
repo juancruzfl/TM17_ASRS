@@ -5,9 +5,9 @@ function normalizeQuestion(question, fallbackId) {
     ? text.options.map((opt) => String(opt))
     : [];
 
-  const subQuestions = Array.isArray(text.subQuestions)
-    ? text.subQuestions.map((s) => String(s))
-    : [];
+  const optionDetails = Array.isArray(text.optionDetails)
+    ? text.optionDetails.map(option => ({ value: option.value, label: String(option.label) }))
+    : null;
 
   return {
     id: question?.id ?? fallbackId,
@@ -15,7 +15,7 @@ function normalizeQuestion(question, fallbackId) {
     type: text.type || 'text',
     required: text.required !== false,
     options,
-    subQuestions,
+    ...(optionDetails ? { optionDetails } : {}),
     helpText: text.help_text || '',
     scope: text.scope || null,
     initiative_id: text.initiative_id || null,

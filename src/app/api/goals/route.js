@@ -8,33 +8,64 @@ import {
   performGoalUpdate,
   ALLOWED_FIELDS,
   computeGoalScore,
+  computeOverallScore,
+  rebalanceGoalWeights,
+  getTargetValueError,
 } from '@/lib/goals/perform-goal-update';
-
-function sameUpdatedAt(clientVal, serverVal) {
-  return String(clientVal ?? '').trim() === String(serverVal ?? '').trim();
-}
+import { computeQuestionSourceValue, syncQuestionSourcedGoals } from '@/lib/goals/question-source';
+import { queryInitiativeQuestions } from '@/lib/query-helpers';
+import { sameUpdatedAt } from '@/lib/updated-at';
+import {
+  GOAL_SOURCE_METHOD_VALUES,
+  getMethodLabelForQuestionError,
+  isMethodAllowedForQuestion,
+  methodNeedsAnswer,
+  resolveQuestionType,
+} from '@/lib/analysis-methods';
 
 function isValidWeight(weight) {
   const numericWeight = Number(weight);
-  return Number.isFinite(numericWeight) && numericWeight > 1 && numericWeight < 100;
+  const hundredths = numericWeight * 100;
+  return Number.isFinite(numericWeight)
+    && numericWeight >= 0
+    && numericWeight <= 100
+    && Math.abs(hundredths - Math.round(hundredths)) < 1e-8;
 }
 
-// Compute overall weighted score across all goals
-function computeOverallScore(goals) {
-  if (goals.length === 0) return 0;
-
-  let weightedSum = 0;
-  let totalWeight = 0;
-
-  for (const goal of goals) {
-    const score = computeGoalScore(goal);
-    weightedSum += score * goal.weight;
-    totalWeight += goal.weight;
+/**
+ * Validate an optional question source. Both fields empty means a manual goal.
+ * Returns { source: { rootFieldId, method } | null } or { error }.
+ */
+function parseQuestionSource(initiativeId, rootFieldId, method, answer, { unchangedFrom = null } = {}) {
+  const hasQuestion = rootFieldId !== undefined && rootFieldId !== null && rootFieldId !== '';
+  const hasMethod = method !== undefined && method !== null && method !== '';
+  if (!hasQuestion && !hasMethod) return { source: null };
+  if (!hasQuestion || !hasMethod) {
+    return { error: 'Select both a survey question and an analysis method' };
   }
-
-  if (totalWeight === 0) return 0;
-  return parseFloat((weightedSum / totalWeight).toFixed(2));
+  if (!GOAL_SOURCE_METHOD_VALUES.includes(method)) {
+    return { error: 'Invalid analysis method' };
+  }
+  const targetAnswer = methodNeedsAnswer(method) ? String(answer ?? '').trim() : '';
+  if (methodNeedsAnswer(method) && !targetAnswer) {
+    return { error: 'Choose the target answer for this method' };
+  }
+  const questionId = Number(rootFieldId);
+  const [question] = Number.isInteger(questionId) ? queryInitiativeQuestions(db, initiativeId, [questionId]) : [];
+  if (!question) {
+    return { error: 'The selected question does not belong to this initiative' };
+  }
+  // A goal saved before methods were limited by question type may keep its
+  // method while other fields are edited; choosing it anew must fit the question.
+  const keepsSavedMethod = unchangedFrom
+    && Number(unchangedFrom.source_root_field_id) === questionId
+    && unchangedFrom.source_method === method;
+  if (!keepsSavedMethod && !isMethodAllowedForQuestion(method, resolveQuestionType(question.field_type, question.validation_rules))) {
+    return { error: getMethodLabelForQuestionError(method, question.field_label || `Question ${questionId}`) };
+  }
+  return { source: { rootFieldId: questionId, method, answer: targetAnswer || null } };
 }
+
 
 // Calculate days until deadline
 function getDaysUntilDeadline(deadline) {
@@ -68,6 +99,9 @@ export async function GET(request) {
       );
     }
 
+    // Refresh question-sourced current values before scoring.
+    const sources = syncQuestionSourcedGoals(db, initiativeId, { userEmail: auth.user.email });
+
     const goals = db.prepare(`
       SELECT g.*, i.initiative_name
       FROM initiative_goal g
@@ -78,6 +112,7 @@ export async function GET(request) {
 
     const goalsWithScores = goals.map((goal) => ({
       ...goal,
+      source: sources.get(goal.goal_id) || null,
       score: parseFloat(computeGoalScore(goal).toFixed(2)),
       daysUntilDeadline: getDaysUntilDeadline(goal.deadline),
     }));
@@ -116,31 +151,52 @@ export async function POST(request) {
       weight,
       scoring_method,
       deadline,
+      source_root_field_id,
+      source_method,
+      source_answer,
     } = body;
 
     // Validate required fields
-    if (!initiative_id || !goal_name || !target_metric || target_value == null || !weight || !scoring_method) {
+    if (!initiative_id || !goal_name || target_value == null || weight == null || weight === '' || !scoring_method) {
       return NextResponse.json(
-        { error: 'Missing required fields: initiative_id, goal_name, target_metric, target_value, weight, scoring_method' },
+        { error: 'Missing required fields: initiative_id, goal_name, target_value, weight, scoring_method' },
         { status: 400 }
       );
     }
 
     // Validate scoring_method value
-    if (!['linear', 'threshold', 'binary'].includes(scoring_method)) {
+    if (!['linear', 'binary'].includes(scoring_method)) {
       return NextResponse.json(
-        { error: 'Invalid scoring_method. Must be: linear, threshold, or binary' },
+        { error: 'Invalid scoring_method. Must be: linear or binary' },
         { status: 400 }
       );
     }
 
-    // Weight must be strictly between 1 and 100
+    const targetError = getTargetValueError(target_value, scoring_method);
+    if (targetError) {
+      return NextResponse.json({ error: targetError }, { status: 400 });
+    }
+
+    // Weight must stay within the percentage range.
     if (!isValidWeight(weight)) {
       return NextResponse.json(
-        { error: 'Weight must be greater than 1 and less than 100' },
+        { error: 'Weight must be between 0 and 100 with no more than two decimal places' },
         { status: 400 }
       );
     }
+
+    const parsedSource = parseQuestionSource(initiative_id, source_root_field_id, source_method, source_answer);
+    if (parsedSource.error) {
+      return NextResponse.json({ error: parsedSource.error }, { status: 400 });
+    }
+    const { source } = parsedSource;
+    // A question-sourced goal starts from the computed value, not a typed one.
+    const sourcedValue = source
+      ? computeQuestionSourceValue(db, initiative_id, source.rootFieldId, source.method, source.answer).value
+      : null;
+    // No responses yet: start at 0, but don't record that 0 as measured progress.
+    const hasStartingData = !source || sourcedValue !== null;
+    const startingValue = source ? (sourcedValue ?? 0) : (current_value || 0);
 
     // Verify initiative exists
     const initiative = db.prepare(
@@ -155,33 +211,43 @@ export async function POST(request) {
     }
 
     const result = db.prepare(`
-      INSERT INTO initiative_goal (initiative_id, goal_name, description, target_metric, target_value, current_value, weight, scoring_method, deadline)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO initiative_goal (initiative_id, goal_name, description, target_metric, target_value, current_value, weight, scoring_method, deadline, source_root_field_id, source_method, source_answer)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       initiative_id,
       goal_name.trim(),
       (description || '').trim(),
-      target_metric.trim(),
+      (target_metric || '').trim(),
       target_value,
-      current_value || 0,
+      startingValue,
       weight,
       scoring_method,
-      deadline || null
+      deadline || null,
+      source?.rootFieldId ?? null,
+      source?.method ?? null,
+      source?.answer ?? null
     );
 
-    const newGoal = db.prepare('SELECT * FROM initiative_goal WHERE goal_id = ?').get(result.lastInsertRowid);
+    // Proportionally rebalance the other goals around the new goal's weight
+    // (same behavior as editing a weight). A first goal is set to 100%.
+    const createdGoal = db.prepare('SELECT * FROM initiative_goal WHERE goal_id = ?').get(result.lastInsertRowid);
+    const rebalanced = rebalanceGoalWeights(db, createdGoal, weight);
+    db.prepare('UPDATE initiative_goal SET weight = ? WHERE goal_id = ?').run(rebalanced.editedWeight, createdGoal.goal_id);
+    const newGoal = db.prepare('SELECT * FROM initiative_goal WHERE goal_id = ?').get(createdGoal.goal_id);
 
     // Record initial progress snapshot
-    db.prepare(`
-      INSERT INTO goal_progress_history (goal_id, initiative_id, recorded_value, target_value, score)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(
-      newGoal.goal_id,
-      newGoal.initiative_id,
-      newGoal.current_value,
-      newGoal.target_value,
-      parseFloat(computeGoalScore(newGoal).toFixed(2))
-    );
+    if (hasStartingData) {
+      db.prepare(`
+        INSERT INTO goal_progress_history (goal_id, initiative_id, recorded_value, target_value, score)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        newGoal.goal_id,
+        newGoal.initiative_id,
+        newGoal.current_value,
+        newGoal.target_value,
+        parseFloat(computeGoalScore(newGoal).toFixed(2))
+      );
+    }
 
     // ── Audit log ──
     logAudit(db, {
@@ -192,15 +258,20 @@ export async function POST(request) {
       payload: {
         initiative_id,
         goal_name: goal_name.trim(),
-        target_metric: target_metric.trim(),
+        target_metric: (target_metric || '').trim(),
         target_value,
         scoring_method,
         deadline: deadline || null,
+        source_root_field_id: source?.rootFieldId ?? null,
+        source_method: source?.method ?? null,
+        source_answer: source?.answer ?? null,
+        adjusted_goal_weights: rebalanced.adjustedGoals,
       },
     });
 
     return NextResponse.json({
       success: true,
+      adjustedGoals: rebalanced.adjustedGoals,
       goal: {
         ...newGoal,
         score: parseFloat(computeGoalScore(newGoal).toFixed(2)),
@@ -245,6 +316,36 @@ export async function PUT(request) {
     const proposedPatch = {};
     for (const field of ALLOWED_FIELDS) {
       if (updates[field] !== undefined) proposedPatch[field] = updates[field];
+    }
+
+    // Validate a changed question source; a sourced goal's current value is
+    // always computed, so a typed current_value is ignored.
+    if (proposedPatch.source_root_field_id !== undefined || proposedPatch.source_method !== undefined || proposedPatch.source_answer !== undefined) {
+      const parsedSource = parseQuestionSource(
+        existing.initiative_id,
+        proposedPatch.source_root_field_id !== undefined ? proposedPatch.source_root_field_id : existing.source_root_field_id,
+        proposedPatch.source_method !== undefined ? proposedPatch.source_method : existing.source_method,
+        proposedPatch.source_answer !== undefined ? proposedPatch.source_answer : existing.source_answer,
+        { unchangedFrom: existing }
+      );
+      if (parsedSource.error) {
+        return NextResponse.json({ error: parsedSource.error }, { status: 400 });
+      }
+      proposedPatch.source_root_field_id = parsedSource.source?.rootFieldId ?? null;
+      proposedPatch.source_method = parsedSource.source?.method ?? null;
+      proposedPatch.source_answer = parsedSource.source?.answer ?? null;
+    }
+    const isSourced = (proposedPatch.source_root_field_id !== undefined
+      ? proposedPatch.source_root_field_id
+      : existing.source_root_field_id) != null;
+    if (isSourced) delete proposedPatch.current_value;
+
+    if (proposedPatch.target_value !== undefined || proposedPatch.scoring_method !== undefined) {
+      const targetError = getTargetValueError(
+        proposedPatch.target_value !== undefined ? proposedPatch.target_value : existing.target_value,
+        proposedPatch.scoring_method !== undefined ? proposedPatch.scoring_method : existing.scoring_method
+      );
+      if (targetError) return NextResponse.json({ error: targetError }, { status: 400 });
     }
 
     if (Object.keys(proposedPatch).length === 0) {
@@ -326,7 +427,11 @@ export async function PUT(request) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
 
-    const updatedGoal = result.goal;
+    let updatedGoal = result.goal;
+    if (isSourced) {
+      syncQuestionSourcedGoals(db, existing.initiative_id, { userEmail: auth.user.email });
+      updatedGoal = db.prepare('SELECT * FROM initiative_goal WHERE goal_id = ?').get(goal_id);
+    }
     return NextResponse.json({
       success: true,
       goal: {
@@ -371,6 +476,10 @@ export async function DELETE(request) {
 
     db.prepare('DELETE FROM initiative_goal WHERE goal_id = ?').run(goalId);
 
+    // Proportionally scale the remaining goals back up to 100%
+    // (same behavior as editing a weight down to 0).
+    const rebalanced = rebalanceGoalWeights(db, existing, 0);
+
     // ── Audit log ──
     logAudit(db, {
       event: 'goal.deleted',
@@ -382,11 +491,13 @@ export async function DELETE(request) {
         initiative_id: existing.initiative_id,
         target_metric: existing.target_metric,
         target_value: existing.target_value,
+        adjusted_goal_weights: rebalanced.adjustedGoals,
       },
     });
 
     return NextResponse.json({
       success: true,
+      adjustedGoals: rebalanced.adjustedGoals,
       message: `Goal ${goalId} deleted`,
     });
   } catch (error) {

@@ -1,3 +1,6 @@
+import { isQuestionFilterActive } from '@/lib/report-engine';
+import { getReportDateRange } from '@/lib/report-date-range';
+
 function ensureObject(value, fallback = {}) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : fallback;
 }
@@ -50,6 +53,7 @@ export function normalizeSnapshot(rawSnapshot) {
             ? Number(trend.confidenceScore)
             : 50,
         })),
+        goals: ensureArray(results.goals),
         explainability: ensureExplainability(results.explainability || {
           inputRowCount: ensureArray(results.filteredTableData).length,
           afterFilterCount: ensureArray(results.filteredTableData).length,
@@ -78,8 +82,65 @@ export function normalizeSnapshot(rawSnapshot) {
       ...results,
       filteredTableData: ensureArray(results.filteredTableData),
       trendData: ensureArray(results.trendData),
+      goals: ensureArray(results.goals),
       explainability: ensureExplainability(results.explainability),
     },
     generatedAt: rawSnapshot.generatedAt || null,
   };
+}
+
+// Converts a stored report row (with its report_data snapshot) into the props
+// ReportDashboard expects.
+export function parseReportForDashboard(report) {
+  let parsed = null;
+  try {
+    parsed = typeof report?.report_data === 'string'
+      ? JSON.parse(report.report_data)
+      : report?.report_data;
+  } catch {
+    parsed = null;
+  }
+
+  const normalized = normalizeSnapshot(parsed);
+  if (!normalized) return { reportData: null, trendData: [], aiInsights: null, initiative: null };
+
+  const results = normalized.results;
+  return {
+    reportData: {
+      reportId: results.reportId,
+      initiativeId: normalized.config.initiativeId,
+      initiativeName: results.initiativeName,
+      generatedDate: results.generatedDate,
+      summary: results.summary,
+      chartData: results.chartData,
+      tableData: results.filteredTableData,
+      ...getStoredRowInfo(results),
+      explainability: results.explainability,
+      goals: results.goals,
+      questionFilters: getAppliedQuestionFilters(normalized.config),
+      dateRange: getReportDateRange(normalized.config),
+    },
+    trendData: results.trendData || [],
+    aiInsights: results.aiInsights || null,
+    initiative: {
+      id: normalized.config.initiativeId,
+      name: results.initiativeName,
+    },
+  };
+}
+
+/**
+ * How many rows a report matched and whether the snapshot stores only the first
+ * of them (reports keep at most 500; see src/lib/reports/report-rows.js).
+ * Older snapshots stored every row, so their count is the stored length.
+ */
+export function getStoredRowInfo(results) {
+  const stored = ensureArray(results?.filteredTableData).length;
+  const rawCount = results?.tableRowCount;
+  const total = rawCount != null && rawCount !== '' && Number.isFinite(Number(rawCount)) ? Number(rawCount) : stored;
+  return { tableRowCount: total, tableRowsTruncated: Boolean(results?.tableRowsTruncated) && total > stored };
+}
+
+export function getAppliedQuestionFilters(config) {
+  return ensureArray(config?.questionSelections).filter((selection) => isQuestionFilterActive(selection?.filter));
 }

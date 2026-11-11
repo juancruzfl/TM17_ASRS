@@ -8,10 +8,11 @@ const navGroups = [
   {
     label: 'Main',
     items: [
-      { href: '/', label: 'Dashboard', icon: 'home', permission: null },
+      { href: '/dashboard', label: 'Dashboard', icon: 'home', permission: null },
       { href: '/initiative-creation', label: 'Initiatives', icon: 'briefcase', permission: 'initiatives.manage' },
       { href: '/reporting', label: 'Reports', icon: 'bar-chart', permission: 'reporting.view' },
-      { href: '/manage-surveys', label: 'Surveys', icon: 'clipboard', permission: 'surveys.distribute' },
+      // Survey Distribution is a tab of the Surveys section.
+      { href: '/manage-surveys', label: 'Surveys', icon: 'clipboard', permission: 'surveys.distribute', alsoActiveFor: ['/survey-distribution'] },
     ],
   },
   {
@@ -19,7 +20,6 @@ const navGroups = [
     items: [
       { href: '/goals', label: 'Goals & Scoring', icon: 'target', permission: 'goals.manage' },
       { href: '/performance/goals', label: 'Progress', icon: 'trending-up', permission: 'performance.view' },
-      { href: '/categories', label: 'Categories', icon: 'grid', permission: 'initiatives.manage' },
     ],
   },
   {
@@ -36,6 +36,7 @@ const navGroups = [
 ];
 
 const icons = {
+  globe: <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>,
   home: <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1h-2z"/></svg>,
   briefcase: <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>,
   'bar-chart': <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>,
@@ -46,7 +47,6 @@ const icons = {
   users: <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>,
   'file-text': <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>,
   'dollar-sign': <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>,
-  grid: <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zm10 0a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>,
   alert: <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>,
   upload: <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>,
 };
@@ -61,10 +61,6 @@ export default function Sidebar() {
     if (href === '/') return pathname === '/';
     return pathname.startsWith(href);
   };
-
-  const userInitials = user.name
-    ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
-    : 'U';
 
   return (
     <aside className="sidebar">
@@ -96,7 +92,7 @@ export default function Sidebar() {
                   <Link
                     key={item.href}
                     href={resolvedHref}
-                    className={`nav-item ${isActive(resolvedHref) ? 'active' : ''}`}
+                    className={`nav-item ${[resolvedHref, ...(item.alsoActiveFor || [])].some(isActive) ? 'active' : ''}`}
                   >
                     {icons[item.icon]}
                     {item.label}
@@ -107,16 +103,6 @@ export default function Sidebar() {
           );
         })}
       </nav>
-
-      <div className="sidebar-user">
-        <div className="sidebar-user-avatar">
-          {userInitials}
-        </div>
-        <div>
-          <div className="sidebar-user-name">{user.name || 'User'}</div>
-          <div className="sidebar-user-role">{user.user_type || 'Staff'}</div>
-        </div>
-      </div>
     </aside>
   );
 }

@@ -1,18 +1,10 @@
 import db from '../../../../lib/db.js';
 import { requirePermission } from '@/lib/auth/server-auth';
 import { logAudit } from '@/lib/audit';
-
-// Map UI-only field types to valid DB types.
-// DB CHECK constraint: field_type IN ('text','number','date','boolean','select','multiselect','rating','json','choice','yesno')
-const UI_TO_DB_TYPE = {
-  textarea: 'text',
-  select: 'text',
-  choice: 'text',
-  checkbox: 'boolean',
-  radio: 'text',
-  email: 'text',
-  url: 'text',
-};
+import { deleteFormAndFields } from '@/lib/forms/delete-form';
+import { getFixedOptionDetails, hasFixedOptions } from '@/lib/forms/fixed-options';
+import { toDbFieldType } from '@/lib/forms/field-types';
+import { isUnchangedLibraryQuestion } from '@/lib/forms/create-form-revision';
 
 function resolveRules(fieldRulesJson, formFieldRulesJson) {
   const base = fieldRulesJson ? JSON.parse(fieldRulesJson) : null;
@@ -32,13 +24,15 @@ export async function GET() {
 
   // For each form, get questions
   const getQuestions = db.prepare(`
-    SELECT fq.form_question_id, f.field_id, f.field_label, f.field_type,
+    SELECT fq.form_question_id, fq.root_field_id, f.field_id, f.field_label, f.field_type,
            fq.required, fq.help_text, f.scope, f.initiative_id,
            f.validation_rules AS field_rules, fq.validation_rules AS form_question_rules
-    FROM form_questions fq
+    FROM form_version_questions fvq
+    JOIN form_questions fq ON fq.form_question_id = fvq.form_question_id
     JOIN field f ON fq.field_id = f.field_id
-    WHERE fq.form_id = ?
-    ORDER BY fq.display_order
+    JOIN form_version fv ON fv.form_version_id = fvq.form_version_id
+    WHERE fq.form_id = ? AND fv.status = 'published' AND fq.is_hidden = 0
+    ORDER BY fvq.display_order
   `);
   const getOptions = db.prepare(`
     SELECT option_value, display_label FROM field_options WHERE field_id = ? ORDER BY display_order`);
@@ -47,13 +41,13 @@ export async function GET() {
     const questions = getQuestions.all(form.id).map(q => {
       const rules = resolveRules(q.field_rules, q.form_question_rules);
       const displayType = (rules && rules.ui_type) || q.field_type;
-      const isOptionType = ['select', 'radio', 'checkbox', 'choice', 'multiselect'].includes(displayType);
-      const isYesNo = displayType === 'yesno';
-      const rawOptions = (isOptionType || isYesNo)
-        ? getOptions.all(q.field_id).map(opt => opt.option_value)
-        : undefined;
+      const isOptionType = ['select', 'radio', 'checkbox', 'choice', 'multiselect'].includes(displayType) || hasFixedOptions(displayType);
+      const optionRows = isOptionType ? getOptions.all(q.field_id) : [];
+      const rawOptions = optionRows.map(opt => opt.option_value);
       return {
         id: q.field_id,
+        // Stable across revisions of the question; survey responses key answers by it.
+        rootId: q.root_field_id ?? q.field_id,
         text: {
           question: q.field_label,
           type: displayType,
@@ -62,7 +56,7 @@ export async function GET() {
           initiative_id: q.initiative_id,
           validation_rules: rules,
           ...(isOptionType && rawOptions ? { options: rawOptions } : {}),
-          ...(isYesNo && rawOptions ? { subQuestions: rawOptions } : {}),
+          ...(isOptionType ? { optionDetails: optionRows.map(option => ({ value: option.option_value, label: option.display_label })) } : {}),
           ...(q.help_text ? { help_text: q.help_text } : {}),
         }
       };
@@ -107,14 +101,22 @@ export async function POST(request) {
       INSERT INTO form (initiative_id, form_name, description, created_at, updated_at, updated_by_user_id, is_published)
       VALUES (?, ?, ?, ?, ?, NULL, 1)
     `);
+    const insertVersion = db.prepare(`
+      INSERT INTO form_version (form_id, version_number, status, created_at, published_at, created_by_user_id)
+      VALUES (?, 1, 'published', ?, ?, ?)
+    `);
     const insertField = db.prepare(`
       INSERT INTO field (field_key, field_label, field_type, scope, initiative_id, is_filterable,
                          is_required_default, is_core_question, is_initiative_specific, validation_rules)
       VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     `);
     const insertFormQuestion = db.prepare(`
-      INSERT INTO form_questions (form_id, field_id, display_order, required, is_hidden, help_text, validation_rules)
+      INSERT INTO form_questions (form_id, field_id, root_field_id, required, is_hidden, help_text, validation_rules)
       VALUES (?, ?, ?, ?, 0, ?, ?)
+    `);
+    const insertVersionQuestion = db.prepare(`
+      INSERT INTO form_version_questions (form_version_id, form_question_id, display_order)
+      VALUES (?, ?, ?)
     `);
     const insertOption = db.prepare(`
       INSERT INTO field_options (field_id, option_value, display_label, display_order)
@@ -126,6 +128,7 @@ export async function POST(request) {
       // Insert new form (survey template)
       const result = insertForm.run(effectiveInitiativeId, title, description || '', now, now);
       const formId = result.lastInsertRowid;
+      const versionId = insertVersion.run(formId, now, now, auth.user?.user_id || null).lastInsertRowid;
 
       let displayOrder = 0;
       const questionObjs = [];
@@ -136,13 +139,7 @@ export async function POST(request) {
         const fieldKey = `${title}_${displayOrder}_${Date.now()}`;
         const fieldLabel = textObj.question || '';
         const uiFieldType = textObj.type || 'text';
-        // For checkbox with options, use multiselect instead of boolean
-        let dbFieldType;
-        if (uiFieldType === 'checkbox' && Array.isArray(textObj.options) && textObj.options.length > 0) {
-          dbFieldType = 'multiselect';
-        } else {
-          dbFieldType = UI_TO_DB_TYPE[uiFieldType] || uiFieldType;
-        }
+        const dbFieldType = toDbFieldType(uiFieldType);
         const required = textObj.required ? 1 : 0;
         const isCoreQuestion = textObj.is_core_question ? 1 : 0;
         const isInitiativeSpecific = textObj.is_initiative_specific ? 1 : 0;
@@ -161,10 +158,11 @@ export async function POST(request) {
         const formFieldRulesJson = textObj.form_validation_rules ? JSON.stringify(textObj.form_validation_rules) : null;
 
         let fieldId;
-        // Only look up existing fields by numeric ID; synthetic IDs (strings) are always new
-        if (textObj.field_id && typeof textObj.field_id === 'number') {
-          const existingField = db.prepare('SELECT field_id FROM field WHERE field_id = ?').get(textObj.field_id);
-          if (existingField) fieldId = existingField.field_id;
+        // Reuse an existing field only when it is unchanged. An edited saved
+        // question becomes a new field (synthetic string IDs are always new).
+        if (textObj.field_id && typeof textObj.field_id === 'number'
+          && isUnchangedLibraryQuestion(db, textObj.field_id, textObj)) {
+          fieldId = textObj.field_id;
         }
         if (!fieldId) {
           // Insert field with the DB-safe type
@@ -175,22 +173,19 @@ export async function POST(request) {
           fieldId = fieldResult.lastInsertRowid;
 
           // Options remain attached even when the answer value is stored as text.
-          if (['select', 'radio', 'choice', 'checkbox', 'multiselect'].includes(uiFieldType) && Array.isArray(textObj.options)) {
-            textObj.options.forEach((opt, idx) => {
-              insertOption.run(fieldId, opt, opt, idx);
-            });
-          }
-
-          // Insert sub-questions for yesno type (stored as field_options)
-          if (dbFieldType === 'yesno' && Array.isArray(textObj.subQuestions)) {
-            textObj.subQuestions.forEach((sub, idx) => {
-              insertOption.run(fieldId, sub, sub, idx);
+          if ((['select', 'radio', 'choice', 'checkbox', 'multiselect'].includes(uiFieldType) && Array.isArray(textObj.options)) || hasFixedOptions(uiFieldType)) {
+            const optionDetails = hasFixedOptions(uiFieldType)
+              ? getFixedOptionDetails(uiFieldType)
+              : textObj.options.map(option => ({ value: option, label: option }));
+            optionDetails.forEach((option, idx) => {
+              insertOption.run(fieldId, String(option.value), option.label, idx);
             });
           }
         }
 
         // Link the canonical question to this form without duplicating it.
-        insertFormQuestion.run(formId, fieldId, displayOrder, required, null, formFieldRulesJson);
+        const formQuestionId = insertFormQuestion.run(formId, fieldId, fieldId, required, null, formFieldRulesJson).lastInsertRowid;
+        insertVersionQuestion.run(versionId, formQuestionId, displayOrder);
 
         questionObjs.push({
           id: fieldId,
@@ -198,8 +193,9 @@ export async function POST(request) {
             question: fieldLabel,
             type: uiFieldType,
             required: !!required,
-            ...(['select', 'radio', 'choice', 'checkbox', 'multiselect'].includes(uiFieldType) && textObj.options ? { options: textObj.options } : {}),
-            ...(dbFieldType === 'yesno' && textObj.subQuestions ? { subQuestions: textObj.subQuestions } : {}),
+            ...(hasFixedOptions(uiFieldType)
+              ? { options: getFixedOptionDetails(uiFieldType).map(option => option.label) }
+              : ['select', 'radio', 'choice', 'checkbox', 'multiselect'].includes(uiFieldType) && textObj.options ? { options: textObj.options } : {}),
             is_core_question: !!isCoreQuestion,
             is_initiative_specific: !!isInitiativeSpecific
           }
@@ -209,6 +205,8 @@ export async function POST(request) {
 
       return {
         id: formId,
+        versionId,
+        versionNumber: 1,
         title,
         description: description || '',
         initiative_id: effectiveInitiativeId,
@@ -266,28 +264,6 @@ export async function DELETE(request) {
     };
 
     const deleteTx = db.transaction((id) => {
-      const quoteSurveyIds = tableExists('surveys')
-        ? db.prepare('SELECT id, responses FROM surveys').all()
-            .filter((survey) => {
-              try {
-                return Number(JSON.parse(survey.responses)?.templateId) === Number(id);
-              } catch {
-                return false;
-              }
-            })
-            .map((survey) => survey.id)
-        : [];
-
-      if (quoteSurveyIds.length && tableExists('reports')) {
-        const deleteReport = db.prepare('DELETE FROM reports WHERE survey_id = ?');
-        quoteSurveyIds.forEach((sid) => deleteReport.run(sid));
-      }
-
-      if (tableExists('surveys')) {
-        const deleteSurvey = db.prepare('DELETE FROM surveys WHERE id = ?');
-        quoteSurveyIds.forEach((surveyId) => deleteSurvey.run(surveyId));
-      }
-
       if (tableExists('survey_distribution')) {
         db.prepare('DELETE FROM survey_distribution WHERE survey_template_id = ?').run(String(id));
       }
@@ -298,8 +274,12 @@ export async function DELETE(request) {
         db.prepare('DELETE FROM submission WHERE form_id = ?').run(id);
       }
 
+      if (tableExists('qr_codes')) {
+        db.prepare("DELETE FROM qr_codes WHERE qr_type = 'survey_template' AND target_id = ?").run(id);
+      }
+
       if (tableExists('form')) {
-        db.prepare('DELETE FROM form WHERE form_id = ?').run(id);
+        deleteFormAndFields(db, id);
       }
     });
 

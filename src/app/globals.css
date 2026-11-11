@@ -529,15 +529,6 @@ body {
   flex-shrink: 0;
 }
 
-.sidebar-user {
-  margin-top: auto;
-  padding: 16px 20px;
-  border-top: 1px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .sidebar-user-avatar {
   width: 36px;
   height: 36px;
@@ -551,17 +542,6 @@ body {
   font-weight: 600;
   flex-shrink: 0;
   position: relative;
-}
-
-.sidebar-user-name {
-  color: var(--color-text-primary);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.sidebar-user-role {
-  color: var(--color-text-secondary);
-  font-size: 11px;
 }
 
 .main-content {
@@ -582,38 +562,6 @@ body {
   padding: 0 32px;
   height: 64px;
   gap: 24px;
-}
-
-.topbar-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  white-space: nowrap;
-}
-
-.topbar-search {
-  flex: 1;
-  max-width: 480px;
-  margin: 0 auto;
-  position: relative;
-}
-
-.topbar-search input {
-  width: 100%;
-  padding: 8px 16px 8px 38px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--color-text-primary);
-  background: var(--color-bg-primary);
-  outline: none;
-  transition: all 150ms ease;
-}
-
-.topbar-search input:focus {
-  border-color: var(--color-asrs-orange);
-  background: #fff;
-  box-shadow: 0 0 0 3px rgba(230,126,34,.1);
 }
 
 .content-area {
@@ -663,6 +611,44 @@ body {
   background: var(--color-asrs-orange-hover);
 }
 
+/* Square icon-only button (e.g. Refresh), same height as the header buttons.
+   Doubled class so it beats .btn-outline's padding wherever that rule sits. */
+.btn-icon.btn-icon {
+  justify-content: center;
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: #6B7280;
+}
+.btn-icon.btn-icon svg {
+  flex-shrink: 0;
+}
+.btn-icon:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+.icon-spin {
+  animation: public-spin 0.8s linear infinite;
+}
+
+/* Page/section "Create …" buttons share one size whether rendered as a
+   <button> or a <Link>: the original header-button height, and a common
+   minimum width (a longer label like "Create Email Distribution" grows to fit). */
+.btn-create {
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 150px;
+  max-width: 100%;
+  height: 34px;
+  padding: 0 16px;
+  font-family: inherit;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
 .btn-outline {
   display: inline-flex;
   align-items: center;
@@ -698,6 +684,68 @@ body {
 .pill-gray { background: #F3F4F6; color: #6B7280; }
 .pill-orange { background: #FFF7ED; color: #EA580C; }
 .pill-blue { background: #EFF6FF; color: #2563EB; }
+
+/* Expand/remove controls for expandable table rows (e.g. survey submissions) */
+.row-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #6B7280;
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.row-icon-btn:hover,
+.row-icon-btn:focus-visible {
+  background: #F3F4F6;
+  color: #111827;
+}
+.row-icon-btn svg {
+  transition: transform 150ms ease;
+}
+.row-icon-btn[aria-expanded="true"] {
+  color: var(--color-asrs-orange);
+}
+.row-icon-btn[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+.row-icon-btn.row-icon-btn-remove:hover,
+.row-icon-btn.row-icon-btn-remove:focus-visible {
+  background: #FEF2F2;
+  border-color: #FECACA;
+  color: #DC2626;
+}
+.row-icon-btn:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+.data-table tr.row-expanded > td {
+  background: #FFF7ED;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Initiative name linking to its own page (dashboard + initiatives tables) */
+.initiative-link {
+  color: #111827;
+  font-weight: 600;
+  text-decoration: none;
+}
+.initiative-link:hover,
+.initiative-link:focus-visible {
+  text-decoration: underline;
+}
 
 /* Stat cards */
 .stats-row {
@@ -763,6 +811,78 @@ body {
 
 .data-table tbody tr:hover {
   background: var(--color-bg-primary);
+}
+
+/* Goals list: visually separate each scoring criterion into its own card. */
+.goal-list-section {
+  background: #F8FAFC;
+}
+
+.goal-list-subtitle {
+  margin-top: 4px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.goal-list-count {
+  padding: 5px 10px;
+  border: 1px solid #E2E8F0;
+  border-radius: 999px;
+  background: #fff;
+  color: #64748B;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.goal-list-table {
+  border-collapse: separate;
+  border-spacing: 0 12px;
+}
+
+.goal-list-table thead th {
+  border-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 2px;
+}
+
+.goal-list-table .goal-list-row {
+  --goal-accent: var(--color-asrs-orange);
+  filter: drop-shadow(0 1px 2px rgba(15, 23, 42, .05));
+  transition: transform 150ms ease, filter 150ms ease;
+}
+
+.goal-list-table .goal-list-row:hover {
+  background: transparent;
+  filter: drop-shadow(0 5px 10px rgba(15, 23, 42, .09));
+  transform: translateY(-1px);
+}
+
+.goal-list-table .goal-list-row > td {
+  background: #fff;
+  border-top: 1px solid #E2E8F0;
+  border-bottom: 1px solid #E2E8F0;
+  padding-top: 18px;
+  padding-bottom: 18px;
+}
+
+.goal-list-table .goal-list-row > td:first-child {
+  border-left: 4px solid var(--goal-accent);
+  border-radius: 10px 0 0 10px;
+}
+
+.goal-list-table .goal-list-row > td:last-child {
+  border-right: 1px solid #E2E8F0;
+  border-radius: 0 10px 10px 0;
+}
+
+.goal-list-table .goal-list-row-editing {
+  --goal-accent: var(--color-asrs-orange);
+}
+
+.goal-list-table .goal-list-row-editing > td:first-child:last-child {
+  border-right: 1px solid #E2E8F0;
+  border-radius: 10px;
 }
 
 /* ==========================================================================

@@ -1,3 +1,5 @@
+import { isLikertType } from '@/lib/forms/likert-scales';
+
 /**
  * Validate a single field value against its type and optional rules.
  * @param {*} value - The submitted value
@@ -12,7 +14,7 @@ export function validateFieldValue(value, field, rules) {
   const typeError = validateType(value, field);
   if (typeError) return typeError;
   const { field_type } = field;
-  if (field_type === 'text' || field_type === 'yesno') {
+  if (field_type === 'text') {
     const str = typeof value === 'string' ? value : String(value ?? '');
     if (rules.minLength != null && str.length < rules.minLength) {
       return `Must be at least ${rules.minLength} characters`;
@@ -55,6 +57,14 @@ export function validateFieldValue(value, field, rules) {
 
 function validateType(value, field) {
   const { field_type } = field;
+  if (isLikertType(field_type)) {
+    const numericValue = Number(value);
+    const validOptions = Array.isArray(field.options) ? field.options.map(Number) : [];
+    if (!Number.isFinite(numericValue) || (validOptions.length > 0 && !validOptions.includes(numericValue))) {
+      return 'Please select a valid Likert response';
+    }
+    return null;
+  }
   if (field_type === 'date') {
     if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
       const d = new Date(value);
@@ -63,7 +73,7 @@ function validateType(value, field) {
     }
     return 'Please enter a valid date';
   }
-  if (['select', 'choice', 'radio'].includes(field_type) && Array.isArray(field.options)) {
+  if (['select', 'choice', 'radio', 'yesno'].includes(field_type) && Array.isArray(field.options)) {
     if (!field.options.includes(value)) {
       return 'Please select a valid option';
     }

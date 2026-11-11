@@ -4,8 +4,11 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import PageLayout from '@/components/PageLayout';
 import ReportDashboard from '@/components/ReportDashboard';
-import { normalizeSnapshot } from '@/lib/report-snapshot';
+import { getAppliedQuestionFilters, normalizeSnapshot } from '@/lib/report-snapshot';
+import { buildCsvLines } from '@/lib/reports/report-export';
 import { apiFetch } from '@/lib/api/client';
+import { buildReportFileName } from '@/lib/download-filename';
+import { getReportDateRange } from '@/lib/report-date-range';
 
 export default function HistoricalReportsPage() {
   const [userRole, setUserRole] = useState('public');
@@ -26,6 +29,9 @@ export default function HistoricalReportsPage() {
   // Comparison
   const [selectedIds, setSelectedIds] = useState([]);
   const [showComparison, setShowComparison] = useState(false);
+  // Full reports (with snapshots) by id; the list itself doesn't include them.
+  const [reportDetails, setReportDetails] = useState({});
+  const [loadingDetails, setLoadingDetails] = useState(false);
 
   // Auth check
   useEffect(() => {
@@ -94,9 +100,26 @@ export default function HistoricalReportsPage() {
     setShowComparison(false);
   }
 
-  function handleCompare() {
-    if (selectedIds.length === 2) {
+  // Loads a report's snapshot (GET /api/reports/[id]); throws with the server's message.
+  async function loadReportDetail(id) {
+    if (reportDetails[id]) return reportDetails[id];
+    const res = await apiFetch(`/api/reports/${id}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.report) throw new Error(body.error || 'Could not load the report');
+    setReportDetails((prev) => ({ ...prev, [id]: body.report }));
+    return body.report;
+  }
+
+  async function handleCompare() {
+    if (selectedIds.length !== 2) return;
+    setLoadingDetails(true);
+    try {
+      await Promise.all(selectedIds.map(loadReportDetail));
       setShowComparison(true);
+    } catch (err) {
+      alert(err.message || 'Could not load the reports to compare.');
+    } finally {
+      setLoadingDetails(false);
     }
   }
 
@@ -107,39 +130,32 @@ export default function HistoricalReportsPage() {
     setStatusFilter('All');
   }
 
-  function downloadCsv(report) {
-    let parsed = null;
+  // CSV of every current response row (GET /api/reports/[id]/rows), followed
+  // by the report's goals. The saved snapshot keeps only the first rows.
+  async function downloadCsv(report) {
     try {
-      parsed = typeof report.report_data === 'string'
-        ? JSON.parse(report.report_data)
-        : report.report_data;
-    } catch {
-      parsed = null;
-    }
+      const [detail, rowsRes] = await Promise.all([
+        loadReportDetail(report.id),
+        apiFetch(`/api/reports/${report.id}/rows`),
+      ]);
+      const rowsBody = await rowsRes.json().catch(() => ({}));
+      if (!rowsRes.ok) throw new Error(rowsBody.error || 'Could not load the report rows');
 
-    const normalized = normalizeSnapshot(parsed);
-    const rows = normalized?.results?.filteredTableData || [];
-    if (rows.length === 0) {
-      alert('No table data available to export.');
-      return;
+      const goals = normalizeSnapshot(detail.report_snapshot)?.results?.goals || [];
+      const csvLines = buildCsvLines(rowsBody.rows || [], goals);
+      if (csvLines.length === 0) {
+        alert('No table data available to export.');
+        return;
+      }
+      const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${buildReportFileName(report.name)}.csv`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      alert(err.message || 'Could not download the report.');
     }
-
-    const columns = Object.keys(rows[0]);
-    const csvLines = [
-      columns.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','),
-      ...rows.map((row) =>
-        columns.map((c) => {
-          const val = row[c] == null ? '' : String(row[c]);
-          return `"${val.replace(/"/g, '""')}"`;
-        }).join(',')
-      ),
-    ];
-    const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `${(report.name || 'report').replace(/\s+/g, '_')}.csv`;
-    link.click();
-    URL.revokeObjectURL(link.href);
   }
 
   function formatDate(dateStr) {
@@ -184,6 +200,9 @@ export default function HistoricalReportsPage() {
         chartData: results.chartData,
         tableData: results.filteredTableData,
         explainability: results.explainability,
+        goals: results.goals,
+        questionFilters: getAppliedQuestionFilters(normalized.config),
+        dateRange: getReportDateRange(normalized.config),
       },
       trendData: results.trendData || [],
       initiative: {
@@ -224,14 +243,15 @@ export default function HistoricalReportsPage() {
   const mostActiveInitiative = Object.entries(initiativeCount).sort(([, a], [, b]) => b - a)[0]?.[0] || '\u2014';
 
   const comparedReports = showComparison
-    ? selectedIds.map((id) => reports.find((r) => r.id === id)).filter(Boolean)
+    ? selectedIds.map((id) => reportDetails[id]).filter(Boolean)
     : [];
 
-  const STATUS_FILTERS = ['All', 'Published', 'Draft', 'Archived'];
+  const STATUS_FILTERS = ['All', 'Published', 'Unpublished', 'Archived'];
 
   const visibleReports = reports.filter((r) => {
     if (statusFilter === 'All') return true;
-    return (r.status || '').toLowerCase() === statusFilter.toLowerCase();
+    const selectedStatus = statusFilter === 'Unpublished' ? 'completed' : statusFilter.toLowerCase();
+    return (r.status || '').toLowerCase() === selectedStatus;
   });
 
   const monthGroups = groupByMonth(visibleReports);
@@ -258,7 +278,7 @@ export default function HistoricalReportsPage() {
     const s = (status || 'draft').toLowerCase();
     if (s === 'published') return { bg: '#D1FAE5', color: '#065F46', label: 'Published' };
     if (s === 'archived') return { bg: '#F3F4F6', color: '#6B7280', label: 'Archived' };
-    if (s === 'completed') return { bg: '#DBEAFE', color: '#1E40AF', label: 'Completed' };
+    if (s === 'completed') return { bg: '#FEF3C7', color: '#92400E', label: 'Unpublished' };
     return { bg: '#FEF3C7', color: '#92400E', label: 'Draft' };
   }
 
@@ -400,7 +420,7 @@ export default function HistoricalReportsPage() {
               )}
               <button
                 onClick={handleCompare}
-                disabled={selectedIds.length !== 2}
+                disabled={selectedIds.length !== 2 || loadingDetails}
                 className="btn-primary"
                 style={{
                   padding: '0.5rem 1.25rem',
@@ -413,7 +433,7 @@ export default function HistoricalReportsPage() {
                   fontSize: '0.88rem',
                 }}
               >
-                Compare ({selectedIds.length}/2)
+                {loadingDetails ? 'Loading…' : `Compare (${selectedIds.length}/2)`}
               </button>
             </div>
           </div>
@@ -526,7 +546,7 @@ export default function HistoricalReportsPage() {
                         )}
                         {(r.status || '').toLowerCase() === 'published' && (
                           <button
-                            onClick={() => updateReportStatus(r.id, 'draft')}
+                            onClick={() => updateReportStatus(r.id, 'completed')}
                             style={{ fontSize: '0.83rem', fontWeight: 500, color: '#92400E', background: 'none', border: 'none', cursor: 'pointer', padding: '0.25rem 0' }}
                           >
                             Unpublish
